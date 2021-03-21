@@ -245,13 +245,39 @@ class ImportWizardView(
         SessionWizardView,
 ):
 
-    """Project import wizard."""
+    """
+    Project import wizard.
+
+    The get and post methods are overridden in order to save the initial_dict data
+    per session (since it's per class).
+    """
 
     form_list = [
         ('basics', ProjectBasicsForm),
         ('extra', ProjectExtraForm),
     ]
     condition_dict = {'extra': lambda self: self.is_advanced()}
+
+    initial_dict_key = 'initial-data'
+
+    def get(self, *args, **kwargs):
+        # The method from the parent should run first,
+        # as the storage is initialized there.
+        response = super().get(*args, **kwargs)
+        self._set_initial_dict()
+        return response
+
+    def _set_initial_dict(self):
+        """Set or restore the initial_dict from the session."""
+        if self.initial_dict:
+            self.storage.data[self.initial_dict_key] = self.initial_dict
+        else:
+            self.initial_dict = self.storage.data.get(self.initial_dict_key, {})
+
+    def post(self, *args, **kwargs):
+        self._set_initial_dict()
+        # The storage is reset after everything is done.
+        return super().post(*args, **kwargs)
 
     def get_form_kwargs(self, step=None):
         """Get args to pass into form instantiation."""
@@ -417,7 +443,7 @@ class ImportView(PrivateViewMixin, TemplateView):
     def post(self, request, *args, **kwargs):
         initial_data = {}
         initial_data['basics'] = {}
-        for key in ['name', 'repo', 'repo_type', 'remote_repository']:
+        for key in ['name', 'repo', 'repo_type', 'remote_repository', 'default_branch']:
             initial_data['basics'][key] = request.POST.get(key)
         initial_data['extra'] = {}
         for key in ['description', 'project_url']:
@@ -1031,15 +1057,17 @@ class SearchAnalyticsBase(ProjectAdminMixin, PrivateViewMixin, TemplateView):
         now = timezone.now().date()
         last_3_month = now - timezone.timedelta(days=90)
 
-        data = (
-            SearchQuery.objects.filter(
-                project=project,
-                created__date__gte=last_3_month,
-                created__date__lte=now,
+        data = []
+        if self._is_enabled(project):
+            data = (
+                SearchQuery.objects.filter(
+                    project=project,
+                    created__date__gte=last_3_month,
+                    created__date__lte=now,
+                )
+                .order_by('-created')
+                .values_list('created', 'query', 'total_results')
             )
-            .order_by('-created')
-            .values_list('created', 'query', 'total_results')
-        )
 
         file_name = '{project_slug}_from_{start}_to_{end}.csv'.format(
             project_slug=project.slug,
@@ -1049,10 +1077,12 @@ class SearchAnalyticsBase(ProjectAdminMixin, PrivateViewMixin, TemplateView):
         # remove any spaces in filename.
         file_name = '-'.join([text for text in file_name.split() if text])
 
-        csv_data = (
+        csv_data = [
             [timezone.datetime.strftime(time, '%Y-%m-%d %H:%M:%S'), query, total_results]
             for time, query, total_results in data
-        )
+        ]
+        # Add headers to the CSV
+        csv_data.insert(0, ['Created Date', 'Query', 'Total Results'])
         pseudo_buffer = Echo()
         writer = csv.writer(pseudo_buffer)
         response = StreamingHttpResponse(
@@ -1085,7 +1115,7 @@ class TrafficAnalyticsViewBase(ProjectAdminMixin, PrivateViewMixin, TemplateView
             return context
 
         # Count of views for top pages over the month
-        top_pages = PageView.top_viewed_pages(project)
+        top_pages = PageView.top_viewed_pages(project, limit=25)
         top_viewed_pages = list(zip(
             top_pages['pages'],
             top_pages['view_counts']
@@ -1105,7 +1135,7 @@ class TrafficAnalyticsViewBase(ProjectAdminMixin, PrivateViewMixin, TemplateView
 
     def _is_enabled(self, project):
         """Should we show traffic analytics for this project?"""
-        return project.has_feature(Feature.STORE_PAGEVIEWS)
+        return True
 
 
 class TrafficAnalyticsView(SettingsOverrideObject):

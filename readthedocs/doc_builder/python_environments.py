@@ -337,7 +337,7 @@ class Virtualenv(PythonEnvironment):
             *self._pip_cache_cmd_argument(),
         ]
 
-        # Install latest pip first,
+        # Install latest pip and setuptools first,
         # so it is used when installing the other requirements.
         pip_version = self.project.get_feature_value(
             Feature.DONT_INSTALL_LATEST_PIP,
@@ -345,13 +345,17 @@ class Virtualenv(PythonEnvironment):
             positive='pip<20.3',
             negative='pip',
         )
-        cmd = pip_install_cmd + [pip_version]
+        setuptools_version = self.project.get_feature_value(
+            Feature.INSTALL_LATEST_SETUPTOOLS,
+            positive='setuptools',
+            negative='setuptools==41.0.1',
+        )
+        cmd = pip_install_cmd + [pip_version, setuptools_version]
         self.build_env.run(
             *cmd, bin_path=self.venv_bin(), cwd=self.checkout_path
         )
 
         requirements = [
-            'setuptools==41.0.1',
             self.project.get_feature_value(
                 Feature.DONT_INSTALL_DOCUTILS,
                 positive='',
@@ -360,7 +364,6 @@ class Virtualenv(PythonEnvironment):
             'mock==1.0.1',
             'pillow==5.4.1',
             'alabaster>=0.7,<0.8,!=0.7.5',
-            'six',
             'commonmark==0.8.1',
             'recommonmark==0.5.0',
         ]
@@ -370,7 +373,11 @@ class Virtualenv(PythonEnvironment):
                 self.project.get_feature_value(
                     Feature.DEFAULT_TO_MKDOCS_0_17_3,
                     positive='mkdocs==0.17.3',
-                    negative='mkdocs<1.1',
+                    negative=self.project.get_feature_value(
+                        Feature.USE_MKDOCS_LATEST,
+                        positive='mkdocs<1.1',
+                        negative='mkdocs',
+                    ),
                 ),
             )
         else:
@@ -654,7 +661,6 @@ class Conda(PythonEnvironment):
         # Install pip-only things.
         pip_requirements = [
             'recommonmark',
-            'six',
         ]
 
         if self.config.doctype == 'mkdocs':
