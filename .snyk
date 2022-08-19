@@ -1,0 +1,73 @@
+# Snyk (https://snyk.io) policy file, patches or ignores known vulnerabilities.
+version: v1.25.0
+ignore: {}
+# patches apply the minimum changes required to fix a vulnerability
+patch:
+  'npm:hawk:20160119':
+    - debowerify > bower > request > hawk:
+        patched: '2022-08-19T16:43:38.753Z'
+    - debowerify > bower > bower-registry-client > request > hawk:
+        patched: '2022-08-19T16:43:38.753Z'
+    - debowerify > bower > insight > request > hawk:
+        patched: '2022-08-19T16:43:38.753Z'
+  'npm:http-signature:20150122':
+    - debowerify > bower > request > http-signature:
+        patched: '2022-08-19T16:43:38.753Z'
+    - debowerify > bower > bower-registry-client > request > http-signature:
+        patched: '2022-08-19T16:43:38.753Z'
+    - debowerify > bower > insight > request > http-signature:
+        patched: '2022-08-19T16:43:38.753Z'
+  SNYK-JS-LODASH-567746:
+    - gulp-eslint > eslint > lodash:
+        patched: '2022-08-19T16:43:38.753Z'
+    - gulp-eslint > eslint > inquirer > lodash:
+        patched: '2022-08-19T16:43:38.753Z'
+    - gulp-eslint > eslint > table > lodash:
+        patched: '2022-08-19T16:43:38.753Z'
+  'npm:mime:20170907':
+    - less > mime:
+        patched: '2022-08-19T16:43:38.753Z'
+    - gulp-less > less > mime:
+        patched: '2022-08-19T16:43:38.753Z'
+    - debowerify > bower > request > form-data > mime:
+        patched: '2022-08-19T16:43:38.753Z'
+    - debowerify > bower > insight > request > form-data > mime:
+        patched: '2022-08-19T16:43:38.753Z'
+  'npm:minimatch:20160620':
+    - debowerify > bower > glob > minimatch:
+        patched: '2022-08-19T16:43:38.753Z'
+    - gulp > vinyl-fs > glob-stream > minimatch:
+        patched: '2022-08-19T16:43:38.753Z'
+    - gulp > vinyl-fs > glob-watcher > gaze > globule > minimatch:
+        patched: '2022-08-19T16:43:38.753Z'
+    - gulp > vinyl-fs > glob-watcher > gaze > globule > glob > minimatch:
+        patched: '2022-08-19T16:43:38.753Z'
+  'npm:request:20160119':
+    - debowerify > bower > bower-registry-client > request:
+        patched: '2022-08-19T16:43:38.753Z'
+    - debowerify > bower > request:
+        patched: '2022-08-19T16:43:38.753Z'
+    - debowerify > bower > insight > request:
+        patched: '2022-08-19T16:43:38.753Z'
+  'npm:semver:20150403':
+    - debowerify > bower > semver:
+        patched: '2022-08-19T16:43:38.753Z'
+    - debowerify > bower > update-notifier > semver-diff > semver:
+        patched: '2022-08-19T16:43:38.753Z'
+    - eslint-plugin-import > read-pkg-up > read-pkg > normalize-package-data > semver:
+        patched: '2022-08-19T16:43:38.753Z'
+    - debowerify > bower > update-notifier > latest-version > package-json > registry-url > npmconf > semver:
+        patched: '2022-08-19T16:43:38.753Z'
+  'npm:shell-quote:20160621':
+    - debowerify > bower > shell-quote:
+        patched: '2022-08-19T16:43:38.753Z'
+  'npm:tunnel-agent:20170305':
+    - debowerify > bower > request > tunnel-agent:
+        patched: '2022-08-19T16:43:38.753Z'
+    - debowerify > bower > bower-registry-client > request > tunnel-agent:
+        patched: '2022-08-19T16:43:38.753Z'
+    - debowerify > bower > insight > request > tunnel-agent:
+        patched: '2022-08-19T16:43:38.753Z'
+  'npm:uglify-js:20151024':
+    - debowerify > bower > handlebars > uglify-js:
+        patched: '2022-08-19T16:43:38.753Z'
