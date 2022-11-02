@@ -22,6 +22,7 @@ from readthedocs.redirects.models import Redirect
     PRODUCTION_DOMAIN='readthedocs.org',
     USE_SUBDOMAIN=True,
     RTD_BUILD_MEDIA_STORAGE='readthedocs.rtd_tests.storage.BuildMediaFileSystemStorageTest',
+    RTD_ALLOW_ORGANIZATIONS=False,
 )
 class APIEndpointMixin(TestCase):
 
@@ -42,6 +43,7 @@ class APIEndpointMixin(TestCase):
         # objects (like a Project for translations/subprojects)
         self.project = fixture.get(
             Project,
+            id=1,
             pub_date=self.created,
             modified_date=self.modified,
             description='Project description',
@@ -99,6 +101,7 @@ class APIEndpointMixin(TestCase):
         self.others_token = fixture.get(Token, key='other', user=self.other)
         self.others_project = fixture.get(
             Project,
+            id=2,
             slug='others-project',
             related_projects=[],
             main_language_project=None,
@@ -165,5 +168,10 @@ class APIEndpointMixin(TestCase):
 
         It's just a helper for debugging API responses.
         """
-        import datadiff
-        return super().assertDictEqual(d1, d2, datadiff.diff(d1, d2))
+        message = ''
+        try:
+            import datadiff
+            message = datadiff.diff(d1, d2)
+        except ImportError:
+            pass
+        return super().assertDictEqual(d1, d2, message)

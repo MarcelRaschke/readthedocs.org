@@ -1,12 +1,12 @@
 import os
-import logging
 
+import structlog
 from django.http import HttpResponse
 from django.shortcuts import get_object_or_404, render
 
 from .decorators import map_project_slug, map_subproject_slug
 
-log = logging.getLogger(__name__)  # noqa
+log = structlog.get_logger(__name__)  # noqa
 
 
 def fast_404(request, *args, **kwargs):
@@ -16,7 +16,7 @@ def fast_404(request, *args, **kwargs):
     This stops us from running RTD logic in our error handling. We already do
     this in RTD prod when we fallback to it.
     """
-    return HttpResponse('Not Found.', status=404)
+    return HttpResponse("Not Found.", status=404)
 
 
 def proxito_404_page_handler(request, exception=None, template_name='404.html'):
@@ -60,9 +60,9 @@ def _get_project_data_from_request(
         if lang_slug and version_slug:
             filename = os.path.join(lang_slug, version_slug, filename)
             log.warning(
-                'URL looks like versioned on a single version project.'
-                'Changing filename to match. filename=%s',
-                filename
+                "URL looks like versioned on a single version project. "
+                "Changing filename to match.",
+                filename=filename,
             )
             lang_slug = version_slug = None
 

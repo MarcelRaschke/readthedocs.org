@@ -5,19 +5,16 @@ Including the main homepage, documentation and header rendering,
 and server errors.
 """
 
-import logging
-
+import structlog
 from django.conf import settings
-from django.http import Http404, JsonResponse
-from django.shortcuts import render, get_object_or_404, redirect
-from django.views.generic import View, TemplateView
+from django.http import JsonResponse
+from django.shortcuts import render
+from django.views.generic import TemplateView, View
 
-from readthedocs.builds.models import Version
-from readthedocs.core.utils.general import wipe_version_via_slugs
 from readthedocs.core.mixins import PrivateViewMixin
 from readthedocs.projects.models import Project
 
-log = logging.getLogger(__name__)
+log = structlog.get_logger(__name__)
 
 
 class NoProjectException(Exception):
@@ -51,30 +48,6 @@ class SupportView(PrivateViewMixin, TemplateView):
         return context
 
 
-def wipe_version(request, project_slug, version_slug):
-    version = get_object_or_404(
-        Version.internal.all(),
-        project__slug=project_slug,
-        slug=version_slug,
-    )
-    # We need to check by ``for_admin_user`` here to allow members of the
-    # ``Admin`` team (which doesn't own the project) under the corporate site.
-    if version.project not in Project.objects.for_admin_user(user=request.user):
-        raise Http404('You must own this project to wipe it.')
-
-    if request.method == 'POST':
-        wipe_version_via_slugs(
-            version_slug=version_slug,
-            project_slug=project_slug,
-        )
-        return redirect('project_version_list', project_slug)
-    return render(
-        request,
-        'wipe_version.html',
-        {'version': version, 'project': version.project},
-    )
-
-
 def server_error_500(request, template_name='500.html'):
     """A simple 500 handler so we get media."""
     r = render(request, template_name)
@@ -83,7 +56,7 @@ def server_error_500(request, template_name='500.html'):
 
 
 def do_not_track(request):
-    dnt_header = request.META.get('HTTP_DNT')
+    dnt_header = request.headers.get("Dnt")
 
     # https://w3c.github.io/dnt/drafts/tracking-dnt.html#status-representation
     return JsonResponse(  # pylint: disable=redundant-content-type-for-json-response

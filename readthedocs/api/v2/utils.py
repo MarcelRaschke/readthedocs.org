@@ -1,8 +1,8 @@
 """Utility functions that are used by both views and celery tasks."""
 
 import itertools
-import logging
 
+import structlog
 from rest_framework.pagination import PageNumberPagination
 
 from readthedocs.builds.constants import (
@@ -17,7 +17,7 @@ from readthedocs.builds.constants import (
 )
 from readthedocs.builds.models import RegexAutomationRule, Version
 
-log = logging.getLogger(__name__)
+log = structlog.get_logger(__name__)
 
 
 def sync_versions_to_db(project, versions, type):  # pylint: disable=redefined-builtin
@@ -30,7 +30,7 @@ def sync_versions_to_db(project, versions, type):  # pylint: disable=redefined-b
     - it does not delete versions
 
     :param project: project to update versions
-    :param versions: list of VCSVersion fetched from the respository
+    :param versions: list of VCSVersion fetched from the repository
     :param type: internal or external version
     :returns: set of versions' slug added
     """
@@ -79,24 +79,24 @@ def sync_versions_to_db(project, versions, type):  # pylint: disable=redefined-b
             Version.objects.filter(
                 project=project,
                 verbose_name=version_name,
+                # Always filter by type, a tag and a branch
+                # can share the same verbose_name.
+                type=type,
             ).update(
                 identifier=version_id,
-                type=type,
                 machine=False,
             )
 
             log.info(
-                '(Sync Versions) Updated Version: [%s=%s] ',
-                version_name,
-                version_id,
+                'Re-syncing versions: version updated.',
+                version_verbose_name=version_name,
+                version_id=version_id,
             )
         else:
             # New Version
             versions_to_create.append((version_id, version_name))
 
-    added.update(
-        _create_versions_in_bulk(project, type, versions_to_create)
-    )
+    added.update(_create_versions(project, type, versions_to_create))
 
     if not has_user_stable:
         stable_version = (
@@ -117,19 +117,26 @@ def sync_versions_to_db(project, versions, type):  # pylint: disable=redefined-b
             latest_version.verbose_name = LATEST_VERBOSE_NAME
             latest_version.save()
     if added:
-        log.info('(Sync Versions) Added Versions: [%s] ', ' '.join(added))
+        log.info(
+            'Re-syncing versions: versions added.',
+            count=len(added),
+            versions=','.join(itertools.islice(added, 100)),
+        )
     return added
 
 
-def _create_versions_in_bulk(project, type, versions):
+def _create_versions(project, type, versions):
     """
-    Create versions (tuple of version_id and version_name) in batch.
+    Create versions (tuple of version_id and version_name).
 
     Returns the slug of all added versions.
+
+    .. note::
+
+       ``Version.slug`` relies on the post_save signal,
+       so we can't use bulk_create.
     """
-    added = set()
-    batch_size = 150
-    objs = (
+    versions_objs = (
         Version(
             project=project,
             type=type,
@@ -138,12 +145,10 @@ def _create_versions_in_bulk(project, type, versions):
         )
         for version_id, version_name in versions
     )
-    while True:
-        batch = list(itertools.islice(objs, batch_size))
-        if not batch:
-            break
-        Version.objects.bulk_create(batch, batch_size)
-        added.update(v.slug for v in batch)
+    added = set()
+    for version in versions_objs:
+        version.save()
+        added.add(version.slug)
     return added
 
 
@@ -209,15 +214,11 @@ def delete_versions_from_db(project, tags_data, branches_data):
         )
         .exclude(active=True)
     )
-    deleted_versions = set(to_delete_qs.values_list('slug', flat=True))
-    if deleted_versions:
-        log.info(
-            '(Sync Versions) Deleted Versions: project=%s, versions=[%s]',
-            project.slug, ' '.join(deleted_versions),
-        )
-        to_delete_qs.delete()
-
-    return deleted_versions
+    _, deleted = to_delete_qs.delete()
+    versions_count = deleted.get('builds.Version', 0)
+    log.info(
+        'Re-syncing versions: versions deleted.', project_slug=project.slug, count=versions_count,
+    )
 
 
 def get_deleted_active_versions(project, tags_data, branches_data):

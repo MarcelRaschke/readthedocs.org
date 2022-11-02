@@ -2,28 +2,20 @@
 
 import codecs
 import copy
-import hashlib
 import itertools
-import json
-import logging
 import os
-import shutil
 
+import structlog
 import yaml
-from django.conf import settings
 
-from readthedocs.builds.constants import EXTERNAL
 from readthedocs.config import PIP, SETUPTOOLS, ParseError
 from readthedocs.config import parse as parse_yaml
 from readthedocs.config.models import PythonInstall, PythonInstallRequirements
 from readthedocs.doc_builder.config import load_yaml_config
-from readthedocs.doc_builder.constants import DOCKER_IMAGE
-from readthedocs.doc_builder.environments import DockerBuildEnvironment
 from readthedocs.doc_builder.loader import get_builder_class
-from readthedocs.projects.constants import LOG_TEMPLATE
 from readthedocs.projects.models import Feature
 
-log = logging.getLogger(__name__)
+log = structlog.get_logger(__name__)
 
 
 class PythonEnvironment:
@@ -40,37 +32,10 @@ class PythonEnvironment:
             self.config = load_yaml_config(version)
         # Compute here, since it's used a lot
         self.checkout_path = self.project.checkout_path(self.version.slug)
-
-    def delete_existing_build_dir(self):
-        # Handle deleting old build dir
-        build_dir = os.path.join(
-            self.venv_path(),
-            'build',
+        log.bind(
+            project_slug=self.project.slug,
+            version_slug=self.version.slug,
         )
-        if os.path.exists(build_dir):
-            log.info(
-                LOG_TEMPLATE,
-                {
-                    'project': self.project.slug,
-                    'version': self.version.slug,
-                    'msg': 'Removing existing build directory',
-                }
-            )
-            shutil.rmtree(build_dir)
-
-    def delete_existing_venv_dir(self):
-        venv_dir = self.venv_path()
-        # Handle deleting old venv dir
-        if os.path.exists(venv_dir):
-            log.info(
-                LOG_TEMPLATE,
-                {
-                    'project': self.project.slug,
-                    'version': self.version.slug,
-                    'msg': 'Removing existing venv directory',
-                }
-            )
-            shutil.rmtree(venv_dir)
 
     def install_requirements(self):
         """Install all requirements from the config object."""
@@ -105,7 +70,7 @@ class PythonEnvironment:
                 '--upgrade',
                 '--upgrade-strategy',
                 'eager',
-                *self._pip_cache_cmd_argument(),
+                '--no-cache-dir',
                 '{path}{extra_requirements}'.format(
                     path=local_path,
                     extra_requirements=extra_req_param,
@@ -123,32 +88,6 @@ class PythonEnvironment:
                 bin_path=self.venv_bin(),
             )
 
-    def _pip_cache_cmd_argument(self):
-        """
-        Return the pip command ``--cache-dir`` or ``--no-cache-dir`` argument.
-
-        The decision is made considering if the directories are going to be
-        cleaned after the build (``RTD_CLEAN_AFTER_BUILD=True`` or project has
-        the ``CLEAN_AFTER_BUILD`` feature enabled) or project has the feature
-        ``CACHED_ENVIRONMENT``. In this case, there is no need to cache
-        anything.
-        """
-        if (
-            # Cache is going to be removed anyways
-            settings.RTD_CLEAN_AFTER_BUILD or
-            self.project.has_feature(Feature.CLEAN_AFTER_BUILD) or
-            # Cache will be pushed/pulled each time and won't be used because
-            # packages are already installed in the environment
-            self.project.has_feature(Feature.CACHED_ENVIRONMENT)
-        ):
-            return [
-                '--no-cache-dir',
-            ]
-        return [
-            '--cache-dir',
-            self.project.pip_cache_path,
-        ]
-
     def venv_bin(self, filename=None):
         """
         Return path to the virtualenv bin path, or a specific binary.
@@ -160,127 +99,6 @@ class PythonEnvironment:
         if filename is not None:
             parts.append(filename)
         return os.path.join(*parts)
-
-    def environment_json_path(self):
-        """Return the path to the ``readthedocs-environment.json`` file."""
-        return os.path.join(
-            self.venv_path(),
-            'readthedocs-environment.json',
-        )
-
-    @property
-    def is_obsolete(self):
-        """
-        Determine if the environment is obsolete for different reasons.
-
-        It checks the the data stored at ``readthedocs-environment.json`` and
-        compares it with the one to be used. In particular:
-
-        * the Python version (e.g. 2.7, 3, 3.6, etc)
-        * the Docker image name
-        * the Docker image hash
-        * the environment variables hash
-
-        :returns: ``True`` when it's obsolete and ``False`` otherwise
-
-        :rtype: bool
-        """
-        # Always returns False if we don't have information about what Python
-        # version/Docker image was used to create the venv as backward
-        # compatibility.
-        if not os.path.exists(self.environment_json_path()):
-            return False
-
-        try:
-            with open(self.environment_json_path(), 'r') as fpath:
-                environment_conf = json.load(fpath)
-        except (IOError, TypeError, KeyError, ValueError):
-            log.warning(
-                'Unable to read/parse readthedocs-environment.json file',
-            )
-            # We remove the JSON file here to avoid cycling over time with a
-            # corrupted file.
-            os.remove(self.environment_json_path())
-            return True
-
-        env_python = environment_conf.get('python', {})
-        env_build = environment_conf.get('build', {})
-        env_vars_hash = environment_conf.get('env_vars_hash', None)
-
-        # By defaulting non-existent options to ``None`` we force a wipe since
-        # we don't know how the environment was created
-        env_python_version = env_python.get('version', None)
-        env_build_image = env_build.get('image', None)
-        env_build_hash = env_build.get('hash', None)
-
-        if isinstance(self.build_env, DockerBuildEnvironment):
-            build_image = self.config.build.image or DOCKER_IMAGE
-            image_hash = self.build_env.image_hash
-        else:
-            # e.g. LocalBuildEnvironment
-            build_image = None
-            image_hash = None
-
-        # If the user define the Python version just as a major version
-        # (e.g. ``2`` or ``3``) we won't know exactly which exact version was
-        # used to create the venv but we can still compare it against the new
-        # one coming from the project version config.
-        return any([
-            env_python_version != self.config.python_full_version,
-            env_build_image != build_image,
-            env_build_hash != image_hash,
-            env_vars_hash != self._get_env_vars_hash(),
-        ])
-
-    def _get_env_vars_hash(self):
-        """
-        Returns the sha256 hash of all the environment variables and their values.
-
-        If there are no environment variables configured for the associated project,
-        it returns sha256 hash of empty string.
-        """
-        m = hashlib.sha256()
-
-        env_vars = self.version.project.environment_variables
-        if self.version.type == EXTERNAL:
-            env_vars = {}
-
-        for variable, value in env_vars.items():
-            hash_str = f'_{variable}_{value}_'
-            m.update(hash_str.encode('utf-8'))
-        return m.hexdigest()
-
-    def save_environment_json(self):
-        """
-        Save on builders disk data about the environment used to build docs.
-
-        The data is saved as a ``.json`` file with this information on it:
-
-        - python.version
-        - build.image
-        - build.hash
-        - env_vars_hash
-        """
-        data = {
-            'python': {
-                'version': self.config.python_full_version,
-            },
-            'env_vars_hash': self._get_env_vars_hash(),
-        }
-
-        if isinstance(self.build_env, DockerBuildEnvironment):
-            build_image = self.config.build.image or DOCKER_IMAGE
-            data.update({
-                'build': {
-                    'image': build_image,
-                    'hash': self.build_env.image_hash,
-                },
-            })
-
-        with open(self.environment_json_path(), 'w') as fpath:
-            # Compatibility for Py2 and Py3. ``io.TextIOWrapper`` expects
-            # unicode but ``json.dumps`` returns str in Py2.
-            fpath.write(str(json.dumps(data)))
 
 
 class Virtualenv(PythonEnvironment):
@@ -317,13 +135,14 @@ class Virtualenv(PythonEnvironment):
         cli_args.append(
             self.venv_path(),
         )
+
         self.build_env.run(
             self.config.python_interpreter,
             *cli_args,
             # Don't use virtualenv bin that doesn't exist yet
             bin_path=None,
             # Don't use the project's root, some config files can interfere
-            cwd='$HOME',
+            cwd=None,
         )
 
     def install_core_requirements(self):
@@ -334,7 +153,7 @@ class Virtualenv(PythonEnvironment):
             'pip',
             'install',
             '--upgrade',
-            *self._pip_cache_cmd_argument(),
+            '--no-cache-dir',
         ]
 
         # Install latest pip and setuptools first,
@@ -345,28 +164,28 @@ class Virtualenv(PythonEnvironment):
             positive='pip<20.3',
             negative='pip',
         )
-        setuptools_version = self.project.get_feature_value(
-            Feature.INSTALL_LATEST_SETUPTOOLS,
-            positive='setuptools',
-            negative='setuptools==41.0.1',
-        )
-        cmd = pip_install_cmd + [pip_version, setuptools_version]
+        cmd = pip_install_cmd + [pip_version, 'setuptools<58.3.0']
         self.build_env.run(
             *cmd, bin_path=self.venv_bin(), cwd=self.checkout_path
         )
 
-        requirements = [
-            self.project.get_feature_value(
-                Feature.DONT_INSTALL_DOCUTILS,
-                positive='',
-                negative='docutils==0.14',
-            ),
-            'mock==1.0.1',
-            'pillow==5.4.1',
-            'alabaster>=0.7,<0.8,!=0.7.5',
-            'commonmark==0.8.1',
-            'recommonmark==0.5.0',
-        ]
+        requirements = []
+
+        # Unpin Pillow on newer Python versions to avoid re-compiling
+        # https://pillow.readthedocs.io/en/stable/installation.html#python-support
+        if self.config.python.version in ("2.7", "3.4", "3.5", "3.6", "3.7"):
+            requirements.append("pillow==5.4.1")
+        else:
+            requirements.append("pillow")
+
+        requirements.extend(
+            [
+                "mock==1.0.1",
+                "alabaster>=0.7,<0.8,!=0.7.5",
+                "commonmark==0.9.1",
+                "recommonmark==0.5.0",
+            ]
+        )
 
         if self.config.doctype == 'mkdocs':
             requirements.append(
@@ -400,6 +219,8 @@ class Virtualenv(PythonEnvironment):
                     negative='readthedocs-sphinx-ext<2.2',
                 ),
             ])
+            if not self.project.has_feature(Feature.USE_SPHINX_LATEST):
+                requirements.extend(["jinja2<3.1.0"])
 
         cmd = copy.copy(pip_install_cmd)
         if self.config.python.use_system_site_packages:
@@ -408,6 +229,10 @@ class Virtualenv(PythonEnvironment):
             # even if it is already installed system-wide (and
             # --system-site-packages is used)
             cmd.append('-I')
+            # If this flag is present,
+            # we need to cap setuptools again.
+            # See https://github.com/readthedocs/readthedocs.org/issues/8775
+            requirements.append('setuptools<58.3.0')
         cmd.extend(requirements)
         self.build_env.run(
             *cmd,
@@ -455,7 +280,7 @@ class Virtualenv(PythonEnvironment):
                 args += ['--upgrade']
             args += [
                 '--exists-action=w',
-                *self._pip_cache_cmd_argument(),
+                '--no-cache-dir',
                 '-r',
                 requirements_file_path,
             ]
@@ -472,6 +297,8 @@ class Virtualenv(PythonEnvironment):
             '-m',
             'pip',
             'list',
+            # Include pre-release versions.
+            '--pre',
         ]
         self.build_env.run(
             *args,
@@ -495,17 +322,14 @@ class Conda(PythonEnvironment):
         """
         Decide whether use ``mamba`` or ``conda`` to create the environment.
 
-        Return ``mamba`` if the project has ``CONDA_USES_MAMBA`` feature and
-        ``conda`` otherwise. This will be the executable name to be used when
-        creating the conda environment.
-
         ``mamba`` is really fast to solve dependencies and download channel
         metadata on startup.
 
         See https://github.com/QuantStack/mamba
         """
-        if self.project.has_feature(Feature.CONDA_USES_MAMBA):
-            return 'mamba'
+        # Config file using ``build.tools.python``
+        if self.config.using_build_tools:
+            return self.config.python_interpreter
         return 'conda'
 
     def _update_conda_startup(self):
@@ -516,8 +340,6 @@ class Conda(PythonEnvironment):
         independently the version of Miniconda that it has installed.
         """
         self.build_env.run(
-            # TODO: use ``self.conda_bin_name()`` once ``mamba`` is installed in
-            # the Docker image
             'conda',
             'update',
             '--yes',
@@ -528,34 +350,9 @@ class Conda(PythonEnvironment):
             cwd=self.checkout_path,
         )
 
-    def _install_mamba(self):
-        self.build_env.run(
-            'conda',
-            'install',
-            '--yes',
-            '--quiet',
-            '--name=base',
-            '--channel=conda-forge',
-            'python=3.7',
-            'mamba',
-            cwd=self.checkout_path,
-        )
-
     def setup_base(self):
         conda_env_path = os.path.join(self.project.doc_path, 'conda')
-        version_path = os.path.join(conda_env_path, self.version.slug)
-
-        if os.path.exists(version_path):
-            # Re-create conda directory each time to keep fresh state
-            log.info(
-                LOG_TEMPLATE,
-                {
-                    'project': self.project.slug,
-                    'version': self.version.slug,
-                    'msg': 'Removing existing conda directory',
-                },
-            )
-            shutil.rmtree(version_path)
+        os.path.join(conda_env_path, self.version.slug)
 
         if self.project.has_feature(Feature.UPDATE_CONDA_STARTUP):
             self._update_conda_startup()
@@ -563,10 +360,6 @@ class Conda(PythonEnvironment):
         if self.project.has_feature(Feature.CONDA_APPEND_CORE_REQUIREMENTS):
             self._append_core_requirements()
             self._show_environment_yaml()
-
-        # TODO: remove it when ``mamba`` is installed in the Docker image
-        if self.project.has_feature(Feature.CONDA_USES_MAMBA):
-            self._install_mamba()
 
         self.build_env.run(
             self.conda_bin_name(),
@@ -625,7 +418,8 @@ class Conda(PythonEnvironment):
 
             for item in dependencies:
                 if isinstance(item, dict) and 'pip' in item:
-                    pip_requirements.extend(item.get('pip', []))
+                    # NOTE: pip can be ``None``
+                    pip_requirements.extend(item.get('pip') or [])
                     dependencies.remove(item)
                     break
 
@@ -654,9 +448,6 @@ class Conda(PythonEnvironment):
             'mock',
             'pillow',
         ]
-
-        if self.project.has_feature(Feature.CONDA_USES_MAMBA):
-            conda_requirements.append('pip')
 
         # Install pip-only things.
         pip_requirements = [
@@ -695,6 +486,8 @@ class Conda(PythonEnvironment):
         self.build_env.run(
             *cmd,
             cwd=self.checkout_path,
+            # TODO: on tests I found that we are not passing ``bin_path`` here
+            # for some reason.
         )
 
         # Install requirements via ``pip install``
@@ -704,7 +497,7 @@ class Conda(PythonEnvironment):
             'pip',
             'install',
             '-U',
-            *self._pip_cache_cmd_argument(),
+            '--no-cache-dir',
         ]
         pip_cmd.extend(pip_requirements)
         self.build_env.run(
@@ -721,8 +514,10 @@ class Conda(PythonEnvironment):
     def list_packages_installed(self):
         """List packages installed in conda."""
         args = [
-            'conda',
+            self.conda_bin_name(),
             'list',
+            '--name',
+            self.version.slug,
         ]
         self.build_env.run(
             *args,

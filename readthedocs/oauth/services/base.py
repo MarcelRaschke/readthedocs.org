@@ -1,26 +1,28 @@
 """OAuth utility functions."""
 
-import logging
 from datetime import datetime
 
+import structlog
 from allauth.socialaccount.models import SocialAccount
 from allauth.socialaccount.providers import registry
 from django.conf import settings
-from django.db.models import Q
 from django.utils import timezone
+from django.utils.translation import gettext_lazy as _
 from oauthlib.oauth2.rfc6749.errors import InvalidClientIdError
 from requests.exceptions import RequestException
 from requests_oauthlib import OAuth2Session
 
-
-log = logging.getLogger(__name__)
+log = structlog.get_logger(__name__)
 
 
 class SyncServiceError(Exception):
 
     """Error raised when a service failed to sync."""
 
-    pass
+    INVALID_OR_REVOKED_ACCESS_TOKEN = _(
+        "Our access to your following accounts was revoked: {provider}. "
+        "Please, reconnect them from your social account connections."
+    )
 
 
 class Service:
@@ -34,6 +36,7 @@ class Service:
 
     adapter = None
     url_pattern = None
+    vcs_provider_slug = None
 
     default_user_avatar_url = settings.OAUTH_AVATAR_USER_DEFAULT_URL
     default_org_avatar_url = settings.OAUTH_AVATAR_ORG_DEFAULT_URL
@@ -42,6 +45,11 @@ class Service:
         self.session = None
         self.user = user
         self.account = account
+        log.bind(
+            user_username=self.user.username,
+            social_provider=self.provider_id,
+            social_account_id=self.account.pk,
+        )
 
     @classmethod
     def for_user(cls, user):
@@ -125,11 +133,12 @@ class Service:
 
         def _updater(data):
             token.token = data['access_token']
+            token.token_secret = data.get("refresh_token", "")
             token.expires_at = timezone.make_aware(
                 datetime.fromtimestamp(data['expires_at']),
             )
             token.save()
-            log.info('Updated token %s:', token)
+            log.info("Updated token.", token_id=token.pk)
 
         return _updater
 
@@ -142,8 +151,9 @@ class Service:
         :param kwargs: optional parameters passed to .get() method
         :type kwargs: dict
         """
+        resp = None
         try:
-            resp = self.get_session().get(url, data=kwargs)
+            resp = self.get_session().get(url, params=kwargs)
 
             # TODO: this check of the status_code would be better in the
             # ``create_session`` method since it could be used from outside, but
@@ -154,10 +164,9 @@ class Service:
                 # valid. Probably the user has revoked the access to our App. He
                 # needs to reconnect his account
                 raise SyncServiceError(
-                    'Our access to your {provider} account was revoked. '
-                    'Please, reconnect it from your social account connections.'.format(
-                        provider=self.provider_name,
-                    ),
+                    SyncServiceError.INVALID_OR_REVOKED_ACCESS_TOKEN.format(
+                        provider=self.provider_name
+                    )
                 )
 
             next_url = self.get_next_url_to_paginate(resp)
@@ -167,20 +176,24 @@ class Service:
             return results
         # Catch specific exception related to OAuth
         except InvalidClientIdError:
-            log.warning('access_token or refresh_token failed: %s', url)
-            raise Exception('You should reconnect your account')
+            log.warning("access_token or refresh_token failed.", url=url)
+            raise SyncServiceError(
+                SyncServiceError.INVALID_OR_REVOKED_ACCESS_TOKEN.format(
+                    provider=self.provider_name
+                )
+            )
         # Catch exceptions with request or deserializing JSON
         except (RequestException, ValueError):
             # Response data should always be JSON, still try to log if not
             # though
             try:
-                debug_data = resp.json()
+                debug_data = resp.json() if resp else {}
             except ValueError:
                 debug_data = resp.content
             log.debug(
-                'Paginate failed at %s with response: %s',
-                url,
-                debug_data,
+                'Paginate failed at URL.',
+                url=url,
+                debug_data=debug_data,
             )
 
         return []
@@ -200,45 +213,28 @@ class Service:
         # Delete RemoteRepository where the user doesn't have access anymore
         # (skip RemoteRepository tied to a Project on this user)
         all_remote_repositories = remote_repositories + remote_repositories_organizations
-        repository_full_names = [r.full_name for r in all_remote_repositories if r is not None]
+        repository_remote_ids = [r.remote_id for r in all_remote_repositories if r is not None]
         (
-            self.user.oauth_repositories
+            self.user.remote_repository_relations
             .exclude(
-                Q(full_name__in=repository_full_names) | Q(project__isnull=False)
+                remote_repository__remote_id__in=repository_remote_ids,
+                remote_repository__vcs_provider=self.vcs_provider_slug
             )
             .filter(account=self.account)
             .delete()
         )
 
         # Delete RemoteOrganization where the user doesn't have access anymore
-        organization_slugs = [o.slug for o in remote_organizations if o is not None]
+        organization_remote_ids = [o.remote_id for o in remote_organizations if o is not None]
         (
-            self.user.oauth_organizations
-            .exclude(slug__in=organization_slugs)
+            self.user.remote_organization_relations
+            .exclude(
+                remote_organization__remote_id__in=organization_remote_ids,
+                remote_organization__vcs_provider=self.vcs_provider_slug
+            )
             .filter(account=self.account)
             .delete()
         )
-
-    def create_repository(self, fields, privacy=None, organization=None):
-        """
-        Update or create a repository from API response.
-
-        :param fields: dictionary of response data from API
-        :param privacy: privacy level to support
-        :param organization: remote organization to associate with
-        :type organization: RemoteOrganization
-        :rtype: RemoteRepository
-        """
-        raise NotImplementedError
-
-    def create_organization(self, fields):
-        """
-        Update or create remote organization from API response.
-
-        :param fields: dictionary response of data from API
-        :rtype: RemoteOrganization
-        """
-        raise NotImplementedError
 
     def get_next_url_to_paginate(self, response):
         """
