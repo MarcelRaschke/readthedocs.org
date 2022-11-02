@@ -296,7 +296,7 @@ pyjwt[crypto]==2.5.0
     # via
     #   -r requirements/pip.txt
     #   django-allauth
-pylint==2.5.3
+pylint==2.7.0
     # via
     #   prospector
     #   pylint-celery
