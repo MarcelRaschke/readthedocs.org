@@ -1,0 +1,285 @@
+import pytest
+from django.core.exceptions import ValidationError
+from django.test import TestCase
+from django_dynamic_fixture import get
+
+from readthedocs.analytics.models import PageView
+from readthedocs.builds.models import Build, Version
+from readthedocs.oauth.models import RemoteRepository
+from readthedocs.projects.models import Feature, ImportedFile, Project, ProjectRelationship
+from readthedocs.search.models import SearchQuery
+
+
+class TestProjectModel(TestCase):
+
+    def test_repository_html_url_with_remote_repository(self):
+        """Test repository_html_url when project has a remote_repository."""
+        remote_repo = get(
+            RemoteRepository,
+            html_url="https://github.com/readthedocs/readthedocs.org",
+            full_name="readthedocs/readthedocs.org",
+        )
+        project = get(
+            Project,
+            repo="git@github.com:readthedocs/readthedocs.org.git",
+            remote_repository=remote_repo,
+        )
+        assert project.repository_html_url == "https://github.com/readthedocs/readthedocs.org"
+
+    def test_repository_html_url_with_ssh_url(self):
+        """Test repository_html_url converts SSH URL to HTTPS."""
+        project = get(
+            Project,
+            repo="git@github.com:readthedocs/readthedocs.org.git",
+            remote_repository=None,
+        )
+        assert project.repository_html_url == "https://github.com/readthedocs/readthedocs.org.git"
+
+    def test_repository_html_url_with_https_url(self):
+        """Test repository_html_url with HTTPS URL."""
+        project = get(
+            Project,
+            repo="https://github.com/readthedocs/readthedocs.org.git",
+            remote_repository=None,
+        )
+        assert project.repository_html_url == "https://github.com/readthedocs/readthedocs.org.git"
+
+    def test_repository_html_url_with_http_url(self):
+        """Test repository_html_url with HTTP URL."""
+        project = get(
+            Project,
+            repo="http://example.com/user/repo.git",
+            remote_repository=None,
+        )
+        assert project.repository_html_url == "http://example.com/user/repo.git"
+
+    def test_repository_full_name_with_remote_repository(self):
+        """Test repository_full_name when project has a remote_repository."""
+        remote_repo = get(
+            RemoteRepository,
+            html_url="https://github.com/readthedocs/readthedocs.org",
+            full_name="readthedocs/readthedocs.org",
+        )
+        project = get(
+            Project,
+            repo="git@github.com:readthedocs/readthedocs.org.git",
+            remote_repository=remote_repo,
+        )
+        assert project.repository_full_name == "readthedocs/readthedocs.org"
+
+    def test_repository_full_name_with_ssh_url(self):
+        """Test repository_full_name extracts from SSH URL."""
+        project = get(
+            Project,
+            repo="git@github.com:readthedocs/readthedocs.org.git",
+            remote_repository=None,
+        )
+        assert project.repository_full_name == "readthedocs/readthedocs.org"
+
+    def test_repository_full_name_with_https_url(self):
+        """Test repository_full_name extracts from HTTPS URL."""
+        project = get(
+            Project,
+            repo="https://github.com/readthedocs/readthedocs.org.git",
+            remote_repository=None,
+        )
+        assert project.repository_full_name == "readthedocs/readthedocs.org"
+
+    def test_repository_full_name_without_git_suffix(self):
+        """Test repository_full_name with URL without .git suffix."""
+        project = get(
+            Project,
+            repo="https://github.com/readthedocs/readthedocs.org",
+            remote_repository=None,
+        )
+        assert project.repository_full_name == "readthedocs/readthedocs.org"
+
+
+class TestProjectRelationshipAlias(TestCase):
+    def setUp(self):
+        self.parent = get(Project, slug="parent")
+        self.child = get(Project, slug="child")
+
+    def _build_relationship(self, alias):
+        return ProjectRelationship(
+            parent=self.parent, child=self.child, alias=alias
+        )
+
+    def test_alias_accepts_simple_slug(self):
+        relation = self._build_relationship("api")
+        relation.full_clean()
+        relation.save()
+        assert relation.alias == "api"
+
+    def test_alias_doesnt_accept_slashes(self):
+        relation = self._build_relationship("api/python")
+        with pytest.raises(ValidationError):
+            relation.full_clean()
+
+    def test_alias_accepts_slashes(self):
+        get(
+            Feature,
+            feature_id=Feature.ALLOW_SLASHES_IN_SUBPROJECT_ALIAS,
+            projects=[self.parent]
+        )
+        relation = self._build_relationship("api/python")
+        relation.full_clean()
+        relation.save()
+        assert relation.alias == "api/python"
+
+    def test_alias_rejects_invalid_paths(self):
+        invalid = ["/api", "api/", "api//python", "api/../etc"]
+        for alias in invalid:
+            with self.subTest(alias=alias):
+                relation = self._build_relationship(alias)
+                with pytest.raises(ValidationError):
+                    relation.full_clean()
+
+    def test_subproject_prefix_with_slash_alias(self):
+        relation = self.parent.add_subproject(self.child, alias="api/python")
+        assert relation.subproject_prefix == "/projects/api/python/"
+
+
+class TestURLPatternsUtils(TestCase):
+    def setUp(self):
+        self.project = get(Project, slug="project")
+        self.translation = get(
+            Project,
+            slug="translation",
+            language="es",
+            main_language_project=self.project,
+        )
+        self.subproject = get(Project, slug="subproject")
+        self.subproject_translation = get(
+            Project,
+            slug="subproject-translation",
+            language="es",
+            main_language_project=self.subproject,
+        )
+        self.project.add_subproject(self.subproject)
+
+    def test_validate_urlpattern(self):
+        self.project.custom_prefix = "/prefix/"
+        self.project.clean()
+        self.assertEqual(self.project.custom_prefix, "/prefix/")
+
+        self.project.custom_prefix = "prefix/"
+        self.project.clean()
+        self.assertEqual(self.project.custom_prefix, "/prefix/")
+
+        self.project.custom_prefix = "/prefix"
+        self.project.clean()
+        self.assertEqual(self.project.custom_prefix, "/prefix/")
+
+        self.project.custom_prefix = "//prefix//"
+        self.project.clean()
+        self.assertEqual(self.project.custom_prefix, "/prefix/")
+
+        self.project.custom_prefix = "/"
+        self.project.clean()
+        self.assertEqual(self.project.custom_prefix, "/")
+
+    def test_validate_urlpattern_translation(self):
+        with pytest.raises(ValidationError) as excinfo:
+            self.translation.custom_prefix = "/prefix/"
+            self.translation.clean()
+        self.assertEqual(excinfo.value.code, "invalid_project")
+
+        with pytest.raises(ValidationError) as excinfo:
+            self.subproject_translation.custom_prefix = "/prefix/"
+            self.subproject_translation.clean()
+        self.assertEqual(excinfo.value.code, "invalid_project")
+
+    def test_validate_urlpattern_subproject(self):
+        self.project.custom_subproject_prefix = "/projects/"
+        self.project.clean()
+        self.assertEqual(self.project.custom_subproject_prefix, "/projects/")
+
+        self.project.custom_subproject_prefix = "projects/"
+        self.project.clean()
+        self.assertEqual(self.project.custom_subproject_prefix, "/projects/")
+
+        self.project.custom_subproject_prefix = "/projects"
+        self.project.clean()
+        self.assertEqual(self.project.custom_subproject_prefix, "/projects/")
+
+        self.project.custom_subproject_prefix = "//projects//"
+        self.project.clean()
+        self.assertEqual(self.project.custom_subproject_prefix, "/projects/")
+
+        self.project.custom_subproject_prefix = "/"
+        self.project.clean()
+        self.assertEqual(self.project.custom_subproject_prefix, "/")
+
+    def test_validate_urlpattern_subproject_no_superproject(self):
+        with pytest.raises(ValidationError) as excinfo:
+            self.subproject.custom_subproject_prefix = "/projects/"
+            self.subproject.clean()
+        self.assertEqual(excinfo.value.code, "invalid_project")
+
+        with pytest.raises(ValidationError) as excinfo:
+            self.subproject_translation.custom_subproject_prefix = "/projects/"
+            self.subproject_translation.clean()
+        self.assertEqual(excinfo.value.code, "invalid_project")
+
+    def test_overlapping_prefixes(self):
+        self.project.custom_prefix = "/projects/"
+        self.project.custom_subproject_prefix = "/projects/es"
+
+        with pytest.raises(ValidationError) as excinfo:
+            self.project.clean()
+        self.assertEqual(excinfo.value.code, "ambiguous_path")
+
+        self.project.custom_prefix = None
+        self.project.custom_subproject_prefix = "es"
+        with pytest.raises(ValidationError) as excinfo:
+            self.project.clean()
+        self.assertEqual(excinfo.value.code, "ambiguous_path")
+
+        self.project.custom_prefix = "/projects/foo"
+        self.project.custom_subproject_prefix = "/projects/foo/es"
+
+        with pytest.raises(ValidationError) as excinfo:
+            self.project.clean()
+        self.assertEqual(excinfo.value.code, "ambiguous_path")
+
+        self.project.custom_prefix = "/projects/foo"
+        self.project.custom_subproject_prefix = "/projects/foo/es/bar/"
+
+        with pytest.raises(ValidationError) as excinfo:
+            self.project.clean()
+        self.assertEqual(excinfo.value.code, "ambiguous_path")
+
+    def test_proxied_api_prefix(self):
+        self.assertEqual(self.project.custom_prefix, None)
+        self.assertEqual(self.project.proxied_api_url, "_/")
+        self.assertEqual(self.project.proxied_api_host, "/_")
+        self.assertEqual(self.project.proxied_api_prefix, None)
+
+        self.project.custom_prefix = "/prefix/"
+        self.project.save()
+
+        self.assertEqual(self.project.proxied_api_url, "_/")
+        self.assertEqual(self.project.proxied_api_host, "/_")
+        self.assertEqual(self.project.proxied_api_prefix, None)
+
+        get(
+            Feature,
+            projects=[self.project],
+            feature_id=Feature.USE_PROXIED_APIS_WITH_PREFIX,
+        )
+        self.assertEqual(self.project.proxied_api_url, "prefix/_/")
+        self.assertEqual(self.project.proxied_api_host, "/prefix/_")
+        self.assertEqual(self.project.proxied_api_prefix, "/prefix/")
+
+    def test_number_of_queries_on_project_deletion(self):
+        for i in range(5):
+            version = get(Version, project=self.project, slug=f"subproject-{i}", active=True, built=True)
+            for _ in range(50):
+                get(PageView, project=self.project, version=version)
+                get(ImportedFile, project=self.project, version=version)
+                get(SearchQuery, project=self.project, version=version)
+                get(Build, project=self.project, version=version)
+
+        with self.assertNumQueries(50):
+            self.project.delete()

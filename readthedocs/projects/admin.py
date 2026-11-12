@@ -1,90 +1,77 @@
 """Django administration interface for `projects.models`."""
 
 from django.conf import settings
-from django.contrib import admin, messages
+from django.contrib import admin
+from django.contrib import messages
 from django.contrib.admin.actions import delete_selected
+from django.db.models import Exists
+from django.db.models import IntegerField
+from django.db.models import OuterRef
 from django.db.models import Sum
+from django.db.models import Value
 from django.forms import BaseInlineFormSet
+from django.utils.html import format_html
 from django.utils.translation import gettext_lazy as _
 
 from readthedocs.builds.models import Version
-from readthedocs.core.history import ExtraSimpleHistoryAdmin, set_change_reason
+from readthedocs.core.admin import ReadOnlyInlineMixin
+from readthedocs.core.history import ExtraSimpleHistoryAdmin
+from readthedocs.core.history import set_change_reason
 from readthedocs.core.utils import trigger_build
-from readthedocs.notifications.views import SendNotificationView
+from readthedocs.projects.tasks.search import reindex_version
 from readthedocs.redirects.models import Redirect
-from readthedocs.search.utils import _indexing_helper
 
 from .forms import FeatureForm
-from .models import (
-    Domain,
-    EmailHook,
-    EnvironmentVariable,
-    Feature,
-    HTMLFile,
-    HTTPHeader,
-    ImportedFile,
-    Project,
-    ProjectRelationship,
-    WebHook,
-    WebHookEvent,
-)
-from .notifications import (
-    DeprecatedBuildWebhookNotification,
-    DeprecatedGitHubWebhookNotification,
-    ResourceUsageNotification,
-)
+from .models import AddonsConfig
+from .models import Domain
+from .models import EmailHook
+from .models import EnvironmentVariable
+from .models import Feature
+from .models import HTMLFile
+from .models import HTTPHeader
+from .models import ImportedFile
+from .models import Project
+from .models import ProjectRelationship
+from .models import WebHook
+from .models import WebHookEvent
 from .tag_utils import import_tags
 from .tasks.utils import clean_project_resources
 
 
-class ProjectSendNotificationView(SendNotificationView):
-    notification_classes = [
-        ResourceUsageNotification,
-        DeprecatedBuildWebhookNotification,
-        DeprecatedGitHubWebhookNotification,
-    ]
-
-    def get_object_recipients(self, obj):
-        for owner in obj.users.all():
-            yield owner
-
-
 class ProjectRelationshipInline(admin.TabularInline):
-
     """Project inline relationship view for :py:class:`ProjectAdmin`."""
 
     model = ProjectRelationship
-    fk_name = 'parent'
-    raw_id_fields = ('child',)
+    fk_name = "parent"
+    raw_id_fields = ("child",)
 
 
 class VersionInlineFormSet(BaseInlineFormSet):
-
     """Limit the number of versions displayed in the inline."""
 
     LIMIT = 200
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
-        self.queryset = self.queryset[:self.LIMIT]
+        self.queryset = self.queryset[: self.LIMIT]
 
 
-class VersionInline(admin.TabularInline):
-
+class VersionInline(ReadOnlyInlineMixin, admin.TabularInline):
     """Version inline relationship view for :py:class:`ProjectAdmin`."""
 
     formset = VersionInlineFormSet
     model = Version
+    classes = ["collapse"]
 
     def get_queryset(self, request):
         return super().get_queryset(request).select_related("project")
 
 
 class RedirectInline(admin.TabularInline):
-
     """Redirect inline relationship view for :py:class:`ProjectAdmin`."""
 
     model = Redirect
+    classes = ["collapse"]
 
 
 class DomainInline(admin.TabularInline):
@@ -92,7 +79,6 @@ class DomainInline(admin.TabularInline):
 
 
 class ProjectOwnerBannedFilter(admin.SimpleListFilter):
-
     """
     Filter for projects with banned owners.
 
@@ -100,16 +86,16 @@ class ProjectOwnerBannedFilter(admin.SimpleListFilter):
     attribute, so we'll create a basic filter to capture banned owners.
     """
 
-    title = 'project owner banned'
-    parameter_name = 'project_owner_banned'
+    title = "project owner banned"
+    parameter_name = "project_owner_banned"
 
-    OWNER_BANNED = 'true'
-    NOT_OWNER_BANNED = 'false'
+    OWNER_BANNED = "true"
+    NOT_OWNER_BANNED = "false"
 
     def lookups(self, request, model_admin):
         return (
-            (self.OWNER_BANNED, _('Yes')),
-            (self.NOT_OWNER_BANNED, _('No')),
+            (self.OWNER_BANNED, _("Yes")),
+            (self.NOT_OWNER_BANNED, _("No")),
         )
 
     def queryset(self, request, queryset):
@@ -121,18 +107,17 @@ class ProjectOwnerBannedFilter(admin.SimpleListFilter):
 
 
 class ProjectSpamThreshold(admin.SimpleListFilter):
-
     """Filter for projects that are potentially SPAM."""
 
-    title = 'Spam Threshold'
-    parameter_name = 'spam_threshold'
+    title = "Spam Threshold"
+    parameter_name = "spam_threshold"
 
-    NOT_ENOUGH_SCORE = 'not_enough_score'
-    DONT_SHOW_ADS = 'dont_show_ads'
-    DENY_ON_ROBOTS = 'deny_on_robots'
-    DONT_SERVE_DOCS = 'dont_serve_docs'
-    DONT_SHOW_DASHBOARD = 'dont_show_dashboard'
-    DELETE_PROJECT = 'delete_project'
+    NOT_ENOUGH_SCORE = "not_enough_score"
+    DONT_SHOW_ADS = "dont_show_ads"
+    DENY_ON_ROBOTS = "deny_on_robots"
+    DONT_SERVE_DOCS = "dont_serve_docs"
+    DONT_SHOW_DASHBOARD = "dont_show_dashboard"
+    DELETE_PROJECT = "delete_project"
 
     def lookups(self, request, model_admin):
         return (
@@ -151,7 +136,7 @@ class ProjectSpamThreshold(admin.SimpleListFilter):
             ),
             (
                 self.DENY_ON_ROBOTS,
-                _('Deny on robots ({}-{})').format(
+                _("Deny on robots ({}-{})").format(
                     settings.RTD_SPAM_THRESHOLD_DENY_ON_ROBOTS,
                     settings.RTD_SPAM_THRESHOLD_DONT_SHOW_DASHBOARD,
                 ),
@@ -172,14 +157,14 @@ class ProjectSpamThreshold(admin.SimpleListFilter):
             ),
             (
                 self.DELETE_PROJECT,
-                _('Delete project (>={})').format(
+                _("Delete project (>={})").format(
                     settings.RTD_SPAM_THRESHOLD_DELETE_PROJECT,
                 ),
             ),
         )
 
     def queryset(self, request, queryset):
-        queryset = queryset.annotate(spam_score=Sum('spam_rules__value'))
+        queryset = queryset.annotate(spam_score=Sum("spam_rules__value"))
         if self.value() == self.NOT_ENOUGH_SCORE:
             return queryset.filter(
                 spam_score__gte=1,
@@ -212,83 +197,136 @@ class ProjectSpamThreshold(admin.SimpleListFilter):
         return queryset
 
 
+@admin.register(Project)
 class ProjectAdmin(ExtraSimpleHistoryAdmin):
-
     """Project model admin view."""
 
-    prepopulated_fields = {'slug': ('name',)}
-    list_display = ('name', 'slug', 'repo')
+    prepopulated_fields = {"slug": ("name",)}
+    list_display = (
+        "name",
+        "slug",
+        "repo",
+        "is_spam",
+        "spam_score_display",
+        "owner_banned_display",
+        "pub_date",
+    )
 
     list_filter = tuple()
-    if 'readthedocsext.spamfighting' in settings.INSTALLED_APPS:
+    if "readthedocsext.spamfighting" in settings.INSTALLED_APPS:
         list_filter = list_filter + (ProjectSpamThreshold,)
 
     list_filter = list_filter + (
         ProjectOwnerBannedFilter,
-        'is_spam',
-        'feature__feature_id',
-        'repo_type',
-        'privacy_level',
-        'programming_language',
-        'documentation_type',
+        "is_spam",
+        "feature__feature_id",
+        "repo_type",
+        "privacy_level",
+        "programming_language",
+        "documentation_type",
     )
 
-    search_fields = ('slug', 'repo')
+    search_fields = ("slug", "repo")
     inlines = [
         ProjectRelationshipInline,
         RedirectInline,
-        VersionInline,
         DomainInline,
+        VersionInline,
     ]
-    readonly_fields = ('pub_date', 'feature_flags', 'matching_spam_rules')
-    raw_id_fields = ('users', 'main_language_project', 'remote_repository')
+    readonly_fields = (
+        "pub_date",
+        "modified_date",
+        "feature_flags",
+        "matching_spam_rules",
+    )
+    raw_id_fields = ("users", "main_language_project", "remote_repository", "latest_build")
     actions = [
-        'send_owner_email',
-        'ban_owner',
-        'run_spam_rule_checks',
-        'build_default_version',
-        'reindex_active_versions',
-        'wipe_all_versions',
-        'import_tags_from_vcs',
+        "ban_owner",
+        "run_spam_rule_checks",
+        "build_default_version",
+        "reindex_active_versions",
+        "import_tags_from_vcs",
     ]
+
+    def get_queryset(self, request):
+        qs = super().get_queryset(request)
+
+        # Annotate spam score from spam rules if spamfighting is installed.
+        if "readthedocsext.spamfighting" in settings.INSTALLED_APPS:
+            qs = qs.annotate(_spam_score=Sum("spam_rules__value"))
+        else:
+            qs = qs.annotate(
+                _spam_score=Value(None, output_field=IntegerField()),
+            )
+
+        # Subquery: does any owner have a banned profile?
+        from readthedocs.core.models import UserProfile
+
+        qs = qs.annotate(
+            _owner_banned=Exists(
+                UserProfile.objects.filter(
+                    user__projects=OuterRef("pk"),
+                    banned=True,
+                ),
+            ),
+        )
+        return qs
+
+    @admin.display(
+        description="Spam Score",
+        ordering="_spam_score",
+    )
+    def spam_score_display(self, obj):
+        score = obj._spam_score
+        if score is None:
+            return "-"
+        if score >= settings.RTD_SPAM_THRESHOLD_DELETE_PROJECT:
+            return format_html('<span style="color: red; font-weight: bold;">{}</span>', score)
+        if score >= settings.RTD_SPAM_THRESHOLD_DENY_ON_ROBOTS:
+            return format_html('<span style="color: orange; font-weight: bold;">{}</span>', score)
+        if score >= 1:
+            return format_html('<span style="color: goldenrod;">{}</span>', score)
+        return score
+
+    @admin.display(
+        description="Owner Banned",
+        boolean=True,
+        ordering="_owner_banned",
+    )
+    def owner_banned_display(self, obj):
+        return obj._owner_banned
 
     def matching_spam_rules(self, obj):
         result = []
         for spam_rule in obj.spam_rules.filter(enabled=True):
-            result.append(f'{spam_rule.spam_rule_type} ({spam_rule.value})')
-        return '\n'.join(result) or 'No matching spam rules'
+            result.append(f"{spam_rule.spam_rule_type} ({spam_rule.value})")
+        return "\n".join(result) or "No matching spam rules"
 
     def feature_flags(self, obj):
-        return '\n'.join([str(f.get_feature_display()) for f in obj.features])
-
-    def send_owner_email(self, request, queryset):
-        view = ProjectSendNotificationView.as_view(
-            action_name='send_owner_email',
-        )
-        return view(request, queryset=queryset)
-
-    send_owner_email.short_description = 'Notify project owners'
+        return "\n".join([str(f.get_feature_display()) for f in obj.features])
 
     def run_spam_rule_checks(self, request, queryset):
         """Run all the spam checks on this project."""
-        if 'readthedocsext.spamfighting' not in settings.INSTALLED_APPS:
+        if "readthedocsext.spamfighting" not in settings.INSTALLED_APPS:
             messages.add_message(
                 request,
                 messages.ERROR,
-                'Spam fighting Django application not installed',
+                "Spam fighting Django application not installed",
             )
             return
 
         from readthedocsext.spamfighting.tasks import spam_rules_check  # noqa
-        project_slugs = queryset.values_list('slug', flat=True)
+
+        project_slugs = queryset.values_list("slug", flat=True)
         # NOTE: convert queryset to a simple list so Celery can serialize it
         spam_rules_check.delay(project_slugs=list(project_slugs))
         messages.add_message(
             request,
             messages.INFO,
-            'Spam check task triggered for {} projects'.format(queryset.count()),
+            "Spam check task triggered for {} projects".format(queryset.count()),
         )
 
+    @admin.action(description="Ban project owner")
     def ban_owner(self, request, queryset):
         """
         Ban project owner.
@@ -309,26 +347,25 @@ class ProjectAdmin(ExtraSimpleHistoryAdmin):
                 messages.add_message(
                     request,
                     messages.ERROR,
-                    'Project has multiple owners: {}'.format(project),
+                    "Project has multiple owners: {}".format(project),
                 )
         if total == 0:
-            messages.add_message(request, messages.ERROR, 'No users banned')
+            messages.add_message(request, messages.ERROR, "No users banned")
         else:
             messages.add_message(
                 request,
                 messages.INFO,
-                'Banned {} user(s)'.format(total),
+                "Banned {} user(s)".format(total),
             )
-
-    ban_owner.short_description = 'Ban project owner'
 
     def delete_selected_and_artifacts(self, request, queryset):
         """Remove HTML/etc artifacts from storage."""
-        if request.POST.get('post'):
+        if request.POST.get("post"):
             for project in queryset:
                 clean_project_resources(project)
         return delete_selected(self, request, queryset)
 
+    @admin.action(description="Build default version")
     def build_default_version(self, request, queryset):
         """Trigger a build for the project version."""
         total = 0
@@ -338,143 +375,98 @@ class ProjectAdmin(ExtraSimpleHistoryAdmin):
         messages.add_message(
             request,
             messages.INFO,
-            'Triggered builds for {} project(s).'.format(total),
+            "Triggered builds for {} project(s).".format(total),
         )
 
-    build_default_version.short_description = 'Build default version'
-
+    @admin.action(description="Reindex active versions to ES")
     def reindex_active_versions(self, request, queryset):
         """Reindex all active versions of the selected projects to ES."""
         qs_iterator = queryset.iterator()
         for project in qs_iterator:
-            version_qs = Version.internal.filter(project=project)
-            active_versions = version_qs.filter(active=True)
+            versions_id_to_reindex = project.versions.for_reindex().values_list("pk", flat=True)
 
-            if not active_versions.exists():
+            if not versions_id_to_reindex.exists():
                 self.message_user(
                     request,
-                    'No active versions of project {}'.format(project),
-                    messages.ERROR
+                    "No versions to be re-indexed for project {}".format(project),
+                    messages.ERROR,
                 )
             else:
-                html_objs_qs = []
-                for version in active_versions.iterator():
-                    html_objs = HTMLFile.objects.filter(project=project, version=version)
-
-                    if html_objs.exists():
-                        html_objs_qs.append(html_objs)
-
-                if html_objs_qs:
-                    _indexing_helper(html_objs_qs, wipe=False)
+                for version_id in versions_id_to_reindex.iterator():
+                    reindex_version.delay(version_id)
 
                 self.message_user(
                     request,
-                    'Task initiated successfully for {}'.format(project),
-                    messages.SUCCESS
+                    "Task initiated successfully for {}".format(project),
+                    messages.SUCCESS,
                 )
 
-    reindex_active_versions.short_description = 'Reindex active versions to ES'
-
-    # TODO: rename method to mention "indexes" on its name
-    def wipe_all_versions(self, request, queryset):
-        """Wipe indexes of all versions of selected projects."""
-        qs_iterator = queryset.iterator()
-        for project in qs_iterator:
-            version_qs = Version.internal.filter(project=project)
-            if not version_qs.exists():
-                self.message_user(
-                    request,
-                    'No active versions of project {}.'.format(project),
-                    messages.ERROR
-                )
-            else:
-                html_objs_qs = []
-                for version in version_qs.iterator():
-                    html_objs = HTMLFile.objects.filter(project=project, version=version)
-
-                    if html_objs.exists():
-                        html_objs_qs.append(html_objs)
-
-                if html_objs_qs:
-                    _indexing_helper(html_objs_qs, wipe=True)
-
-                self.message_user(
-                    request,
-                    'Task initiated successfully for {}.'.format(project),
-                    messages.SUCCESS
-                )
-
-    wipe_all_versions.short_description = 'Wipe all versions from ES'
-
+    @admin.action(description="Import tags from the version control API")
     def import_tags_from_vcs(self, request, queryset):
         for project in queryset.iterator():
             tags = import_tags(project)
             if tags:
                 self.message_user(
                     request,
-                    'Imported tags for {}: {}'.format(project, tags),
-                    messages.SUCCESS
+                    "Imported tags for {}: {}".format(project, tags),
+                    messages.SUCCESS,
                 )
             else:
-                self.message_user(
-                    request,
-                    'No tags found for {}'.format(project),
-                    messages.WARNING
-                )
-
-    import_tags_from_vcs.short_description = 'Import tags from the version control API'
+                self.message_user(request, "No tags found for {}".format(project), messages.WARNING)
 
     def get_actions(self, request):
         actions = super().get_actions(request)
-        actions['delete_selected'] = (
+        actions["delete_selected"] = (
             self.__class__.delete_selected_and_artifacts,
-            'delete_selected',
+            "delete_selected",
             delete_selected.short_description,
         )
         return actions
 
 
+@admin.register(HTMLFile, ImportedFile)
 class ImportedFileAdmin(admin.ModelAdmin):
-
     """Admin view for :py:class:`ImportedFile`."""
 
-    raw_id_fields = ('project', 'version')
-    list_display = ('path', 'version', 'build')
-    list_select_related = ('project', 'version', 'version__project')
-    search_fields = ('project__slug', 'version__slug', 'path', 'build')
+    raw_id_fields = ("project", "version")
+    list_display = ("path", "version", "build")
+    list_select_related = ("project", "version", "version__project")
+    search_fields = ("project__slug", "version__slug", "path", "build")
 
 
 class HTTPHeaderInline(admin.TabularInline):
     model = HTTPHeader
 
 
+@admin.register(Domain)
 class DomainAdmin(admin.ModelAdmin):
     list_display = (
-        'domain',
-        'project',
-        'canonical',
-        'https',
-        'count',
-        'ssl_status',
-        'created',
-        'modified',
+        "domain",
+        "project",
+        "canonical",
+        "https",
+        "count",
+        "ssl_status",
+        "created",
+        "modified",
     )
     inlines = (HTTPHeaderInline,)
-    search_fields = ('domain', 'project__slug')
-    raw_id_fields = ('project',)
-    list_filter = ('canonical', 'https', 'ssl_status')
+    search_fields = ("domain", "project__slug")
+    raw_id_fields = ("project",)
+    list_filter = ("canonical", "https", "ssl_status")
     model = Domain
 
 
+@admin.register(HTTPHeader)
 class HTTPHeaderAdmin(admin.ModelAdmin):
     list_display = (
-        'name',
-        'value',
-        'domain_name',
-        'project_slug',
+        "name",
+        "value",
+        "domain_name",
+        "project_slug",
     )
-    raw_id_fields = ('domain',)
-    search_fields = ('name', 'domain__name', 'project__slug')
+    raw_id_fields = ("domain",)
+    search_fields = ("name", "domain__name", "project__slug")
     model = HTTPHeader
 
     def domain_name(self, http_header):
@@ -484,32 +476,53 @@ class HTTPHeaderAdmin(admin.ModelAdmin):
         return http_header.domain.project.slug
 
 
+@admin.register(Feature)
 class FeatureAdmin(admin.ModelAdmin):
     model = Feature
     form = FeatureForm
-    list_display = ('feature_id', 'project_count', 'default_true', 'future_default_true')
-    search_fields = ('feature_id',)
-    filter_horizontal = ('projects',)
-    readonly_fields = ('add_date',)
-    raw_id_fields = ('projects',)
+    list_display = (
+        "feature_id",
+        "project_count",
+        "default_true",
+        "future_default_true",
+    )
+    search_fields = ("feature_id",)
+    filter_horizontal = ("projects",)
+    readonly_fields = ("add_date",)
+    raw_id_fields = ("projects",)
 
     def project_count(self, feature):
         return feature.projects.count()
 
 
+@admin.register(EnvironmentVariable)
 class EnvironmentVariableAdmin(admin.ModelAdmin):
     model = EnvironmentVariable
-    list_display = ('name', 'value', 'public', 'project', 'created')
-    search_fields = ('name', 'project__slug')
+    list_display = ("name", "value", "public", "project", "created")
+    search_fields = ("name", "project__slug")
 
 
-admin.site.register(Project, ProjectAdmin)
-admin.site.register(EnvironmentVariable, EnvironmentVariableAdmin)
-admin.site.register(ImportedFile, ImportedFileAdmin)
-admin.site.register(HTTPHeader, HTTPHeaderAdmin)
-admin.site.register(Domain, DomainAdmin)
-admin.site.register(Feature, FeatureAdmin)
-admin.site.register(EmailHook)
-admin.site.register(WebHook)
+@admin.register(AddonsConfig)
+class AddonsConfigAdmin(admin.ModelAdmin):
+    model = AddonsConfig
+    raw_id_fields = ("project", "options_base_version")
+    list_display = ("project", "enabled")
+    search_fields = ("project__slug",)
+    list_editable = ("enabled",)
+
+
+@admin.register(EmailHook)
+class EmailHookAdmin(admin.ModelAdmin):
+    raw_id_fields = ("project",)
+    list_display = ("email", "project")
+    search_fields = ("email", "project__slug", "project__name")
+
+
+@admin.register(WebHook)
+class WebHookAdmin(admin.ModelAdmin):
+    raw_id_fields = ("project",)
+    list_display = ("url", "project")
+    search_fields = ("url", "project__slug", "project__name")
+
+
 admin.site.register(WebHookEvent)
-admin.site.register(HTMLFile, ImportedFileAdmin)

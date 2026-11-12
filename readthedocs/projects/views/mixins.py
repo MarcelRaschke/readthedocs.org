@@ -1,22 +1,21 @@
 """Mixin classes for project views."""
+
 from urllib.parse import urlparse
 
+import structlog
 from celery import chain
 from django.shortcuts import get_object_or_404
 
-import structlog
-
-from readthedocs.core.resolver import resolve, resolve_path
+from readthedocs.core.resolver import Resolver
 from readthedocs.core.utils import prepare_build
+from readthedocs.projects.models import Feature
 from readthedocs.projects.models import Project
-from readthedocs.projects.signals import project_import
 
 
 log = structlog.get_logger(__name__)
 
 
 class ProjectRelationMixin:
-
     """
     Mixin class for constructing model views for project dashboard.
 
@@ -28,9 +27,9 @@ class ProjectRelationMixin:
     :cvar project_context_object_name: Context object name for project
     """
 
-    project_lookup_url_kwarg = 'project_slug'
-    project_lookup_field = 'project'
-    project_context_object_name = 'project'
+    project_lookup_url_kwarg = "project_slug"
+    project_lookup_field = "project"
+    project_context_object_name = "project"
 
     def get_project_queryset(self):
         return Project.objects.for_admin_user(user=self.request.user)
@@ -44,9 +43,7 @@ class ProjectRelationMixin:
         )
 
     def get_queryset(self):
-        return self.model.objects.filter(
-            **{self.project_lookup_field: self.get_project()}
-        )
+        return self.model.objects.filter(**{self.project_lookup_field: self.get_project()})
 
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
@@ -55,12 +52,11 @@ class ProjectRelationMixin:
 
 
 class ProjectRelationListMixin:
-
     """Injects ``subprojects_and_urls`` into the context."""
 
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
-        context['subprojects_and_urls'] = self._get_subprojects_and_urls()
+        context["subprojects_and_urls"] = self._get_subprojects_and_urls()
         return context
 
     def _get_subprojects_and_urls(self):
@@ -74,16 +70,17 @@ class ProjectRelationListMixin:
         subprojects_and_urls = []
 
         project = self.get_project()
-        subprojects = project.subprojects.select_related('child')
+        subprojects = project.subprojects.select_related("child")
 
         if not subprojects.exists():
             return subprojects_and_urls
 
-        main_domain = resolve(project)
+        resolver = Resolver()
+        main_domain = resolver.get_domain(project)
         parsed_main_domain = urlparse(main_domain)
 
         for subproject in subprojects:
-            subproject_path = resolve_path(subproject.child)
+            subproject_path = resolver.resolve_path(subproject.child)
             parsed_subproject_domain = parsed_main_domain._replace(
                 path=subproject_path,
             )
@@ -97,59 +94,57 @@ class ProjectRelationListMixin:
 
 
 class ProjectImportMixin:
-
     """Helpers to import a Project."""
 
-    def finish_import_project(self, request, project, tags=None):
+    def finish_import_project(self, request, project):
         """
         Perform last steps to import a project into Read the Docs.
 
         - Add the user from request as maintainer
-        - Set all the tags to the project
-        - Send Django Signal
-        - Trigger initial build
+        - Run extra tasks that are needed before building the project
+        - Trigger the initial build
+
+        Direct upload projects skip the last two steps:
+        Read the Docs never builds them, and the webhook and SSH key are not needed.
 
         It requires the Project was already saved into the DB.
 
         :param request: Django Request object
         :param project: Project instance just imported (already saved)
-        :param tags: tags to add to the project
         """
-        if not tags:
-            tags = []
-
         project.users.add(request.user)
-        for tag in tags:
-            project.tags.add(tag)
-
         log.info(
-            'Project imported.',
+            "Project imported.",
             project_slug=project.slug,
             user_username=request.user.username,
-            tags=tags,
         )
 
-        # TODO: this signal could be removed, or used for sync task
-        project_import.send(sender=project, request=request)
-
-        self.trigger_initial_build(project, request.user)
-
-    def trigger_initial_build(self, project, user):
-        """
-        Trigger initial build after project is imported.
-
-        :param project: project's documentation to be built
-        :returns: Celery AsyncResult promise
-        """
+        if project.is_direct_upload:
+            return None
 
         update_docs, build = prepare_build(project)
         if (update_docs, build) == (None, None):
             return None
 
+        tasks = self._get_post_import_tasks(project, request.user)
+        # Build-isolated builds are dispatched by ``admit_queued_builds``,
+        # running ``update_docs`` too would build it twice on two builders.
+        if not project.has_feature(Feature.USE_BUILD_ISOLATED):
+            tasks.append(update_docs)
+        if tasks:
+            chain(*tasks).apply_async()
+
+    def _get_post_import_tasks(self, project, user):
+        """
+        Tasks to run after importing a project, before triggering the initial build.
+
+        We attach the webhook, if needed. This is overridden in .com
+        to attach the SSH key as well.
+        """
         from readthedocs.oauth.tasks import attach_webhook
-        task_promise = chain(
-            attach_webhook.si(project.pk, user.pk),
-            update_docs,
-        )
-        async_result = task_promise.apply_async()
-        return async_result
+
+        tasks = []
+        if project.remote_repository and not project.is_github_app_project:
+            tasks.append(attach_webhook.si(project_pk=project.pk, user_pk=user.pk))
+
+        return tasks

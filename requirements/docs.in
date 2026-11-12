@@ -1,26 +1,29 @@
 # Packages required to build docs, independent of application dependencies
 
--r pip.txt
+# Pin Sphinx due to an issue with sphinx-tabs
+# https://github.com/executablebooks/sphinx-tabs/issues/209
+# https://github.com/executablebooks/sphinx-tabs/issues/212
+sphinx==8.2.3
 
-sphinx_rtd_theme==1.1.0
-sphinx-tabs==3.3.1
-sphinx-intl==2.0.1
-sphinx-design==0.2.0
-sphinx-multiproject==1.0.0rc1
-readthedocs-sphinx-search==0.1.1
+matplotlib  # opengraph social cards
 
-# Test out hoverxref
-git+https://github.com/readthedocs/sphinx-hoverxref
+sphinx_rtd_theme
+sphinx-tabs
+sphinx-intl
+sphinx-design
+sphinx-multiproject
+
+# RTD deps :)
+sphinx-notfound-page
 
 # Docs
-sphinxemoji==0.2.0
-sphinxcontrib-httpdomain==1.8.0
-sphinx-prompt==1.4.0
-sphinx-notfound-page==0.8
-sphinx-autobuild==2021.3.14
+sphinxemoji
+sphinxcontrib-httpdomain
+sphinx-prompt
+sphinx-autobuild
+sphinxext-opengraph
+sphinx-copybutton
+sphinx-sitemap
 
 # Markdown
-myst_parser==0.17.2
-
-# spinxcontrib-video
-git+https://github.com/readthedocs/sphinxcontrib-video/
+myst_parser

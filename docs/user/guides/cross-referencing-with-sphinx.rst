@@ -1,5 +1,5 @@
-Cross-referencing with Sphinx
-=============================
+How to use cross-references with Sphinx
+=======================================
 
 When writing documentation you often need to link to other pages of your documentation,
 other sections of the current page, or sections from other pages.
@@ -29,7 +29,7 @@ with two markup options: reStructuredText and MyST (Markdown).
 - If you are not familiar with reStructuredText,
   check :doc:`sphinx:usage/restructuredtext/basics` for a quick introduction.
 - If you want to learn more about the MyST Markdown dialect,
-  check out :doc:`myst-parser:syntax/syntax`.
+  check out :doc:`myst-parser:syntax/reference`.
 
 .. contents:: Table of contents
    :local:
@@ -384,7 +384,7 @@ For example, to see all targets from the Read the Docs documentation:
 
 .. prompt:: bash
 
-   python -m sphinx.ext.intersphinx https://docs.readthedocs.io/en/stable/objects.inv
+   python -m sphinx.ext.intersphinx https://docs.readthedocs.com/platform/stable/objects.inv
 
 Cross-referencing targets in other documentation sites
 ------------------------------------------------------

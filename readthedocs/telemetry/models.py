@@ -5,7 +5,6 @@ from django_extensions.db.models import TimeStampedModel
 
 
 class BuildDataManager(models.Manager):
-
     """Manager for the BuildData model."""
 
     def collect(self, build, data):
@@ -94,11 +93,12 @@ class BuildDataManager(models.Manager):
             "success": build.success,
         }
         data["project"] = {"id": build.project.id, "slug": build.project.slug}
-        data["version"] = {
-            "id": build.version.id,
-            "slug": build.version.slug,
-        }
-        org = build.project.organizations.first()
+        if build.version:
+            data["version"] = {
+                "id": build.version.id,
+                "slug": build.version.slug,
+            }
+        org = build.project.organization
         if org:
             data["organization"] = {
                 "id": org.id,
@@ -111,12 +111,10 @@ class BuildDataManager(models.Manager):
 class BuildData(TimeStampedModel):
     class Meta:
         verbose_name_plural = "Build data"
+        indexes = [
+            # Speeds up `delete_old_build_data` task.
+            models.Index(fields=["created"]),
+        ]
 
     data = models.JSONField()
     objects = BuildDataManager()
-
-    def __str__(self):
-        build_id = self.data.get("build", {}).get("id")
-        project_slug = self.data.get("project", {}).get("slug")
-        version_slug = self.data.get("version", {}).get("slug")
-        return f"BuildData for {project_slug}:{version_slug} build={build_id}"

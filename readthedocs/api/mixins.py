@@ -1,18 +1,18 @@
-import functools
-
 import structlog
-from django.shortcuts import get_object_or_404
+from django.http import Http404
 from django.utils.functional import cached_property
 
+from readthedocs.core.unresolver import UnresolverError
 from readthedocs.core.unresolver import unresolve
 from readthedocs.core.utils import get_cache_tag
-from readthedocs.projects.models import Project
+from readthedocs.core.utils.objects import cached_method
+from readthedocs.proxito.cache import add_cache_tags
+
 
 log = structlog.get_logger(__name__)
 
 
 class CDNCacheTagsMixin:
-
     """
     Add cache tags for project and version to the response of this view.
 
@@ -31,7 +31,7 @@ class CDNCacheTagsMixin:
         response = super().dispatch(request, *args, **kwargs)
         cache_tags = self._get_cache_tags()
         if cache_tags:
-            response["Cache-Tag"] = ",".join(cache_tags)
+            add_cache_tags(response, cache_tags)
         return response
 
     def _get_cache_tags(self):
@@ -64,14 +64,13 @@ class CDNCacheTagsMixin:
 
 
 class EmbedAPIMixin:
-
     """
     Helper for EmbedAPI v2 and v3.
 
     Used in combination with ``CDNCacheTagsMixin`` to add project/version slug
     in the response to be cached.
 
-    Note that these methods are cached (``lru_cache`` and ``cached_property``)
+    Note that these methods are cached (``cached_method`` and ``cached_property``)
     to avoid hitting the database multiple times on the same request.
     """
 
@@ -80,27 +79,29 @@ class EmbedAPIMixin:
         url = self.request.GET.get("url")
         if not url:
             return None
-        return unresolve(url)
+        try:
+            return unresolve(url)
+        except UnresolverError:
+            # If we were unable to resolve the URL, it
+            # isn't pointing to a valid RTD project.
+            return None
 
-    @functools.lru_cache(maxsize=1)
+    @cached_method
     def _get_project(self):
         if self.external:
-            return
+            return None
 
         if self.unresolved_url:
-            project_slug = self.unresolved_url.project.slug
-        else:
-            project_slug = self.request.GET.get("project")
-        return get_object_or_404(Project, slug=project_slug)
+            return self.unresolved_url.project
 
-    @functools.lru_cache(maxsize=1)
+        raise Http404
+
+    @cached_method
     def _get_version(self):
         if self.external:
-            return
+            return None
 
         if self.unresolved_url:
-            version_slug = self.unresolved_url.version.slug
-        else:
-            version_slug = self.request.GET.get("version", "latest")
-        project = self._get_project()
-        return get_object_or_404(project.versions.all(), slug=version_slug)
+            return self.unresolved_url.version
+
+        raise Http404

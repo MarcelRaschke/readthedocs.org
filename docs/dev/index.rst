@@ -12,7 +12,6 @@ or taking the open source Read the Docs codebase for your own custom installatio
    code-of-conduct
    issue-labels
    roadmap
-   design/index
 
 .. toctree::
    :caption: Development
@@ -22,9 +21,14 @@ or taking the open source Read the Docs codebase for your own custom installatio
    guides/index
    design
    docs
+   style-guide
    front-end
    i18n
+   migrations
    server-side-search
    search-integration
+   aws-temporary-credentials
+   subscriptions
+   github-app
    settings
    tests

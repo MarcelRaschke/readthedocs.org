@@ -1,30 +1,35 @@
 """Build and Version QuerySet classes."""
+
 import datetime
 
 import structlog
 from django.db import models
+from django.db.models import Case
 from django.db.models import Q
+from django.db.models import Value
+from django.db.models import When
 from django.utils import timezone
 
-from readthedocs.builds.constants import (
-    BUILD_STATE_CANCELLED,
-    BUILD_STATE_FINISHED,
-    BUILD_STATE_TRIGGERED,
-    EXTERNAL,
-)
+from readthedocs.builds.constants import BUILD_STATE_CANCELLED
+from readthedocs.builds.constants import BUILD_STATE_FINISHED
+from readthedocs.builds.constants import BUILD_STATE_TRIGGERED
+from readthedocs.builds.constants import EXTERNAL
+from readthedocs.builds.constants import LATEST_VERBOSE_NAME
+from readthedocs.builds.constants import STABLE_VERBOSE_NAME
 from readthedocs.core.permissions import AdminPermission
+from readthedocs.core.querysets import NoReprQuerySet
 from readthedocs.core.utils.extend import SettingsOverrideObject
 from readthedocs.projects import constants
 from readthedocs.projects.models import Project
 
+
 log = structlog.get_logger(__name__)
 
 
-__all__ = ['VersionQuerySet', 'BuildQuerySet', 'RelatedBuildQuerySet']
+__all__ = ["VersionQuerySet", "BuildQuerySet", "RelatedBuildQuerySet"]
 
 
-class VersionQuerySetBase(models.QuerySet):
-
+class VersionQuerySetBase(NoReprQuerySet, models.QuerySet):
     """Versions take into account their own privacy_level setting."""
 
     use_for_related_fields = True
@@ -51,14 +56,11 @@ class VersionQuerySetBase(models.QuerySet):
     def _add_from_user_projects(self, queryset, user, admin=False, member=False):
         """Add related objects from projects where `user` is an `admin` or a `member`."""
         if user and user.is_authenticated:
-            projects_pk = (
-                AdminPermission.projects(
-                    user=user,
-                    admin=admin,
-                    member=member,
-                )
-                .values_list('pk', flat=True)
-            )
+            projects_pk = AdminPermission.projects(
+                user=user,
+                admin=admin,
+                member=member,
+            ).values_list("pk", flat=True)
             user_queryset = self.filter(project__in=projects_pk)
             queryset = user_queryset | queryset
         return queryset
@@ -85,7 +87,6 @@ class VersionQuerySetBase(models.QuerySet):
     def public(
         self,
         user=None,
-        project=None,
         only_active=True,
         include_hidden=True,
         only_built=False,
@@ -97,15 +98,19 @@ class VersionQuerySetBase(models.QuerySet):
 
            External versions use the `Project.external_builds_privacy_level`
            field instead of its `privacy_level` field.
+
+        .. note::
+
+           Avoid filtering by reverse relationships in this method (like project),
+           and instead use project.builds or similar, so the same object is shared
+           between the results.
         """
         queryset = self._public_only()
         if user:
             if user.is_superuser:
                 queryset = self.all()
             else:
-                queryset = self._add_from_user_projects(queryset, user)
-        if project:
-            queryset = queryset.filter(project=project)
+                queryset = self._add_from_user_projects(queryset, user, admin=True, member=True)
         if only_active:
             queryset = queryset.filter(active=True)
         if only_built:
@@ -117,13 +122,59 @@ class VersionQuerySetBase(models.QuerySet):
     def api(self, user=None):
         return self.public(user, only_active=False)
 
+    def api_v2(self, *args, **kwargs):
+        # API v2 is the same as API v3 for .org, but it's
+        # different for .com, this method is overridden there.
+        return self.api(*args, **kwargs)
+
+    def for_reindex(self):
+        """
+        Get all versions that can be reindexed.
+
+        A version can be reindexed if:
+
+        - It's active and has been built at least once successfully.
+          Since that means that it has files to be indexed.
+        - Its project is not delisted or marked as spam.
+        - Its project has search indexing enabled.
+        """
+        return (
+            self.filter(
+                active=True,
+                built=True,
+                builds__state=BUILD_STATE_FINISHED,
+                builds__success=True,
+                project__search_indexing_enabled=True,
+            )
+            .exclude(project__delisted=True)
+            .exclude(project__is_spam=True)
+            .distinct()
+        )
+
+    def sort_version_aware_naive(self):
+        """
+        Order versions with "latest" first, "stable" second, then alphabetically.
+
+        This is a naive SQL-level approximation of the full version-aware
+        sorting (which requires Python-level semantic version parsing).
+        It ensures special versions appear at the top, but does not handle
+        semantic version ordering (e.g. 1.9 vs 1.10).
+        """
+        return self.order_by(
+            Case(
+                When(verbose_name=LATEST_VERBOSE_NAME, then=Value(0)),
+                When(verbose_name=STABLE_VERBOSE_NAME, then=Value(1)),
+                default=Value(2),
+            ),
+            "verbose_name",
+        )
+
 
 class VersionQuerySet(SettingsOverrideObject):
     _default_class = VersionQuerySetBase
 
 
-class BuildQuerySet(models.QuerySet):
-
+class BuildQuerySet(NoReprQuerySet, models.QuerySet):
     """
     Build objects that are privacy aware.
 
@@ -135,14 +186,11 @@ class BuildQuerySet(models.QuerySet):
     def _add_from_user_projects(self, queryset, user, admin=False, member=False):
         """Add related objects from projects where `user` is an `admin` or a `member`."""
         if user and user.is_authenticated:
-            projects_pk = (
-                AdminPermission.projects(
-                    user=user,
-                    admin=admin,
-                    member=member,
-                )
-                .values_list('pk', flat=True)
-            )
+            projects_pk = AdminPermission.projects(
+                user=user,
+                admin=admin,
+                member=member,
+            ).values_list("pk", flat=True)
             user_queryset = self.filter(project__in=projects_pk)
             queryset = user_queryset | queryset
         return queryset
@@ -158,13 +206,10 @@ class BuildQuerySet(models.QuerySet):
            External versions use the `Project.external_builds_privacy_level`
            field instead of its `privacy_level` field.
         """
-        queryset = (
-            self.filter(
-                version__privacy_level=constants.PUBLIC,
-                version__project__privacy_level=constants.PUBLIC,
-            )
-            .exclude(version__type=EXTERNAL)
-        )
+        queryset = self.filter(
+            version__privacy_level=constants.PUBLIC,
+            version__project__privacy_level=constants.PUBLIC,
+        ).exclude(version__type=EXTERNAL)
         queryset |= self.filter(
             version__type=EXTERNAL,
             project__external_builds_privacy_level=constants.PUBLIC,
@@ -187,6 +232,11 @@ class BuildQuerySet(models.QuerySet):
     def api(self, user=None):
         return self.public(user)
 
+    def api_v2(self, *args, **kwargs):
+        # API v2 is the same as API v3 for .org, but it's
+        # different for .com, this method is overridden there.
+        return self.api(*args, **kwargs)
+
     def concurrent(self, project):
         """
         Check if the max build concurrency for this project was reached.
@@ -200,14 +250,17 @@ class BuildQuerySet(models.QuerySet):
           If the project/translation belongs to an organization, we count all concurrent
           builds for all the projects from the organization.
 
+        A build counts as soon as it's been dispatched to the build-isolated
+        fleet (``dispatched_date`` set) — it occupies a slot even while it waits
+        in the broker for a builder to pick it up. A build still genuinely
+        queued (``triggered`` but not yet dispatched) does not count.
+
         :rtype: tuple
         :returns: limit_reached, number of concurrent builds, number of max concurrent
         """
         limit_reached = False
         query = Q(
             project=project,
-            # Limit builds to 5 hours ago to speed up the query
-            date__gt=timezone.now() - datetime.timedelta(hours=5),
         )
 
         if project.main_language_project:
@@ -221,27 +274,26 @@ class BuildQuerySet(models.QuerySet):
 
         # If the project belongs to an organization, count all the projects
         # from this organization as well
-        organization = project.organizations.first()
+        organization = project.organization
         if organization:
             query |= Q(project__in=organization.projects.all())
 
+        # Limit builds to 5 hours ago to speed up the query
+        query &= Q(date__gt=timezone.now() - datetime.timedelta(hours=5))
+
         concurrent = (
-            (
-                self.filter(query).exclude(
-                    state__in=[
-                        BUILD_STATE_TRIGGERED,
-                        BUILD_STATE_FINISHED,
-                        BUILD_STATE_CANCELLED,
-                    ]
-                )
-            )
+            self.filter(query)
+            .exclude(state__in=[BUILD_STATE_FINISHED, BUILD_STATE_CANCELLED])
+            # Legacy builds never set ``dispatched_date``,
+            # so they stay excluded exactly as before.
+            .exclude(Q(state=BUILD_STATE_TRIGGERED) & Q(dispatched_date__isnull=True))
             .distinct()
             .count()
         )
 
         max_concurrent = Project.objects.max_concurrent_builds(project)
         log.info(
-            'Concurrent builds.',
+            "Concurrent builds.",
             project_slug=project.slug,
             concurrent=concurrent,
             max_concurrent=max_concurrent,
@@ -250,9 +302,25 @@ class BuildQuerySet(models.QuerySet):
             limit_reached = True
         return (limit_reached, concurrent, max_concurrent)
 
+    def pending_upload(self):
+        """
+        Get all builds that are pending upload (when using the upload API).
 
-class RelatedBuildQuerySet(models.QuerySet):
+        When a build is created using the upload API,
+        it is created in the triggered state,
+        and when it's queued for processing, the task_id is set.
 
+        We filter by task_id=None, since when a task is re-tried, it goes back to the triggered state,
+        and we don't want to count those builds as pending uploads.
+        """
+        return self.filter(
+            is_uploaded=True,
+            state=BUILD_STATE_TRIGGERED,
+            task_id=None,
+        )
+
+
+class RelatedBuildQuerySet(NoReprQuerySet, models.QuerySet):
     """
     For models with association to a project through :py:class:`Build`.
 
@@ -266,14 +334,11 @@ class RelatedBuildQuerySet(models.QuerySet):
 
     def _add_from_user_projects(self, queryset, user):
         if user and user.is_authenticated:
-            projects_pk = (
-                AdminPermission.projects(
-                    user=user,
-                    admin=True,
-                    member=True,
-                )
-                .values_list('pk', flat=True)
-            )
+            projects_pk = AdminPermission.projects(
+                user=user,
+                admin=True,
+                member=True,
+            ).values_list("pk", flat=True)
             user_queryset = self.filter(build__project__in=projects_pk)
             queryset = user_queryset | queryset
         return queryset
@@ -289,3 +354,8 @@ class RelatedBuildQuerySet(models.QuerySet):
 
     def api(self, user=None):
         return self.public(user)
+
+    def api_v2(self, *args, **kwargs):
+        # API v2 is the same as API v3 for .org, but it's
+        # different for .com, this method is overridden there.
+        return self.api(*args, **kwargs)

@@ -2,7 +2,7 @@ from datetime import timedelta
 
 import django_dynamic_fixture as fixture
 from django.contrib.auth.models import User
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django_dynamic_fixture import get
 
 from readthedocs.organizations.models import Organization
@@ -15,7 +15,6 @@ from readthedocs.projects.querysets import (
 
 
 class ProjectQuerySetTests(TestCase):
-
     def setUp(self):
         self.user = get(User)
         self.another_user = get(User)
@@ -74,23 +73,24 @@ class ProjectQuerySetTests(TestCase):
         }
 
     def test_subproject_queryset_attributes(self):
-        self.assertEqual(ParentRelatedProjectQuerySet.project_field, 'parent')
+        self.assertEqual(ParentRelatedProjectQuerySet.project_field, "parent")
         self.assertTrue(ParentRelatedProjectQuerySet.use_for_related_fields)
-        self.assertEqual(ChildRelatedProjectQuerySet.project_field, 'child')
+        self.assertEqual(ChildRelatedProjectQuerySet.project_field, "child")
         self.assertTrue(ChildRelatedProjectQuerySet.use_for_related_fields)
 
     def test_subproject_queryset_as_manager_gets_correct_class(self):
         mgr = ChildRelatedProjectQuerySet.as_manager()
         self.assertEqual(
             mgr.__class__.__name__,
-            'ManagerFromChildRelatedProjectQuerySet',
+            "ManagerFromChildRelatedProjectQuerySet",
         )
         mgr = ParentRelatedProjectQuerySet.as_manager()
         self.assertEqual(
             mgr.__class__.__name__,
-            'ManagerFromParentRelatedProjectQuerySet',
+            "ManagerFromParentRelatedProjectQuerySet",
         )
 
+    @override_settings(RTD_ALLOW_ORGANIZATIONS=True)
     def test_is_active(self):
         project = get(Project, skip=False)
         self.assertTrue(Project.objects.is_active(project))
@@ -110,10 +110,14 @@ class ProjectQuerySetTests(TestCase):
 
         organization = get(Organization, disabled=False)
         organization.projects.add(project)
+        # Clear cached organization
+        del project.organization
         self.assertTrue(Project.objects.is_active(project))
 
         organization.disabled = True
         organization.save()
+        # Clear cached organization
+        del project.organization
         self.assertFalse(Project.objects.is_active(project))
 
     def test_dashboard(self):
@@ -137,18 +141,12 @@ class ProjectQuerySetTests(TestCase):
 
     def test_public_user(self):
         query = Project.objects.public(user=self.user)
-        projects = (
-            self.user_projects |
-            {self.another_project}
-        )
+        projects = self.user_projects | {self.another_project}
         self.assertEqual(query.count(), len(projects))
         self.assertEqual(set(query), projects)
 
         query = Project.objects.public(user=self.another_user)
-        projects = (
-            self.another_user_projects |
-            {self.project}
-        )
+        projects = self.another_user_projects | {self.project}
         self.assertEqual(query.count(), len(projects))
         self.assertEqual(set(query), projects)
 
@@ -190,10 +188,7 @@ class ProjectQuerySetTests(TestCase):
         self.assertEqual(set(query), projects)
 
     def test_for_user_and_viewer_same_user(self):
-        query = Project.objects.for_user_and_viewer(
-            user=self.user,
-            viewer=self.user
-        )
+        query = Project.objects.for_user_and_viewer(user=self.user, viewer=self.user)
         projects = self.user_projects
         self.assertEqual(query.count(), len(projects))
         self.assertEqual(set(query), projects)
@@ -219,8 +214,67 @@ class ProjectQuerySetTests(TestCase):
         )
 
 
-class FeatureQuerySetTests(TestCase):
+class ProjectWithFeatureQuerySetTests(TestCase):
+    @override_settings(RTD_ALLOW_ORGANIZATIONS=True)
+    def test_with_feature_explicit(self):
+        project = fixture.get(Project, main_language_project=None)
+        other = fixture.get(Project, main_language_project=None)
+        feature = fixture.get(Feature, projects=[project])
+        self.assertQuerySetEqual(
+            Project.objects.with_feature(feature.feature_id),
+            [project],
+            ordered=False,
+        )
+        self.assertFalse(other.has_feature(feature.feature_id))
 
+    def test_with_feature_default_true(self):
+        project = fixture.get(Project, main_language_project=None)
+        feature = fixture.get(
+            Feature,
+            projects=[],
+            add_date=project.pub_date + timedelta(days=1),
+            default_true=True,
+        )
+        newer = fixture.get(
+            Project,
+            main_language_project=None,
+            pub_date=feature.add_date + timedelta(days=1),
+        )
+        self.assertQuerySetEqual(
+            Project.objects.with_feature(feature.feature_id),
+            [project],
+            ordered=False,
+        )
+        self.assertTrue(project.has_feature(feature.feature_id))
+        self.assertFalse(newer.has_feature(feature.feature_id))
+
+    def test_with_feature_future_default_true(self):
+        project = fixture.get(Project, main_language_project=None)
+        feature = fixture.get(
+            Feature,
+            projects=[],
+            add_date=project.pub_date - timedelta(days=1),
+            future_default_true=True,
+        )
+        older = fixture.get(
+            Project,
+            main_language_project=None,
+            pub_date=feature.add_date - timedelta(days=1),
+        )
+        self.assertQuerySetEqual(
+            Project.objects.with_feature(feature.feature_id),
+            [project],
+            ordered=False,
+        )
+        self.assertTrue(project.has_feature(feature.feature_id))
+        self.assertFalse(older.has_feature(feature.feature_id))
+
+    def test_with_feature_unknown(self):
+        fixture.get(Project, main_language_project=None)
+        self.assertQuerySetEqual(Project.objects.with_feature("does-not-exist"), [])
+
+
+class FeatureQuerySetTests(TestCase):
     def test_feature_for_project_is_explicit_applied(self):
         project = fixture.get(Project, main_language_project=None)
         feature = fixture.get(Feature, projects=[project])
@@ -251,9 +305,9 @@ class FeatureQuerySetTests(TestCase):
             add_date=project.pub_date - timedelta(days=1),
             default_true=True,
         )
-        self.assertQuerysetEqual(
+        self.assertQuerySetEqual(
             Feature.objects.for_project(project),
-            [repr(feature1), repr(feature3)],
+            [feature1, feature3],
             ordered=False,
         )
 
@@ -277,9 +331,9 @@ class FeatureQuerySetTests(TestCase):
             add_date=project.pub_date - timedelta(days=1),
             future_default_true=True,
         )
-        self.assertQuerysetEqual(
+        self.assertQuerySetEqual(
             Feature.objects.for_project(project),
-            [repr(feature1), repr(feature3)],
+            [feature1, feature3],
             ordered=False,
         )
 
@@ -287,8 +341,8 @@ class FeatureQuerySetTests(TestCase):
         project1 = fixture.get(Project, main_language_project=None)
         project2 = fixture.get(Project, main_language_project=None)
         feature = fixture.get(Feature, projects=[project1, project2])
-        self.assertQuerysetEqual(
+        self.assertQuerySetEqual(
             Feature.objects.for_project(project1),
-            [repr(feature)],
+            [feature],
             ordered=False,
         )

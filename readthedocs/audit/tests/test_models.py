@@ -1,5 +1,5 @@
 from django.contrib.auth.models import User
-from django.test import TestCase
+from django.test import TestCase, override_settings
 from django_dynamic_fixture import get
 
 from readthedocs.audit.models import AuditLog
@@ -7,8 +7,8 @@ from readthedocs.organizations.models import Organization, OrganizationOwner
 from readthedocs.projects.models import Project
 
 
+@override_settings(RTD_ALLOW_ORGANIZATIONS=True)
 class TestAuditModels(TestCase):
-
     def setUp(self):
         self.user = get(User)
         self.project = get(Project, users=[self.user])

@@ -19,11 +19,9 @@ communication channels:
 
 - Ask usage questions ("How do I?") on `StackOverflow`_.
 - Report bugs, suggest features, or view the source code `on GitHub`_.
-- Discuss development topics on `Gitter`_.
 
 .. _StackOverFlow: https://stackoverflow.com/questions/tagged/read-the-docs
 .. _on GitHub: https://github.com/readthedocs/readthedocs.org
-.. _Gitter: https://gitter.im/readthedocs/community
 
 Contributing
 ------------
@@ -33,6 +31,14 @@ starting with contributions, we suggest focusing on the following areas:
 
 .. contents::
     :local:
+
+.. tip::
+    You can also contribute to the `Read the Docs Sphinx Theme`_,
+    or Sphinx extensions in the `Read the Docs GitHub organization`_ like `sphinx-notfound-page`_.
+
+.. _Read the Docs Sphinx Theme: https://sphinx-rtd-theme.readthedocs.io/en/stable/
+.. _Read the Docs GitHub organization: https://github.com/readthedocs
+.. _sphinx-notfound-page: https://github.com/readthedocs/sphinx-notfound-page
 
 Contributing to development
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -68,7 +74,7 @@ When contributing code, then please follow the standard Contribution Guidelines 
 Contributing to documentation
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-Documentation for Read the Docs itself is hosted by Read the Docs at https://docs.readthedocs.io (likely the website you are currently reading).
+Documentation for Read the Docs itself is hosted by Read the Docs at https://docs.readthedocs.com/dev/ (likely the website you are currently reading).
 
 There are guidelines around writing and formatting documentation for the project.
 For full details, including how to build it, see :doc:`/docs`.
@@ -168,7 +174,7 @@ label. The reported issue …
 
     Examples:
 
-    - *Refactor namedtuples to dataclasess*
+    - *Refactor namedtuples to dataclasses*
     - *Change font size for the project's title*
 
 … is a valid problem within the code base:

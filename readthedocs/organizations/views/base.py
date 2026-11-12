@@ -1,29 +1,45 @@
 """Base classes for organization views."""
-from functools import lru_cache
 
 from django.conf import settings
 from django.contrib.messages.views import SuccessMessageMixin
 from django.http import Http404
 from django.shortcuts import get_object_or_404
+from django.shortcuts import render
 from django.urls import reverse_lazy
 
+from readthedocs.core.utils.objects import cached_method
+from readthedocs.core.utils.spam import is_spam_organization
 from readthedocs.invitations.models import Invitation
-from readthedocs.organizations.forms import (
-    OrganizationForm,
-    OrganizationOwnerForm,
-    OrganizationTeamBasicForm,
-    OrganizationTeamMemberForm,
-)
-from readthedocs.organizations.models import (
-    Organization,
-    OrganizationOwner,
-    Team,
-    TeamMember,
-)
+from readthedocs.organizations.forms import OrganizationForm
+from readthedocs.organizations.forms import OrganizationOwnerForm
+from readthedocs.organizations.forms import OrganizationTeamBasicForm
+from readthedocs.organizations.forms import OrganizationTeamMemberForm
+from readthedocs.organizations.models import Organization
+from readthedocs.organizations.models import OrganizationOwner
+from readthedocs.organizations.models import Team
+from readthedocs.organizations.models import TeamMember
+
+
+class BlockSpamOrganization:
+    """
+    Protects views for organizations that are considered spam.
+
+    .. note::
+
+       This will inspect all projects in the organization, it may be
+       expensive for organizations with many projects. Use it
+       for views where the check is worth the cost.
+    """
+
+    def dispatch(self, request, *args, **kwargs):
+        organization = self.get_organization()
+        if is_spam_organization(organization):
+            template_name = "errors/dashboard/spam.html"
+            return render(request, template_name=template_name, status=410)
+        return super().dispatch(request, *args, **kwargs)
 
 
 class CheckOrganizationsEnabled:
-
     """
     Return 404 if organizations aren't enabled.
 
@@ -40,8 +56,7 @@ class CheckOrganizationsEnabled:
 
 
 # Mixins
-class OrganizationMixin(CheckOrganizationsEnabled):
-
+class OrganizationMixin(SuccessMessageMixin, CheckOrganizationsEnabled):
     """
     Mixin class that provides organization sublevel objects.
 
@@ -55,7 +70,7 @@ class OrganizationMixin(CheckOrganizationsEnabled):
         access
     """
 
-    org_url_field = 'slug'
+    org_url_field = "slug"
     admin_only = True
 
     def get_queryset(self):
@@ -74,7 +89,7 @@ class OrganizationMixin(CheckOrganizationsEnabled):
             return Organization.objects.for_admin_user(user=self.request.user)
         return Organization.objects.for_user(user=self.request.user)
 
-    @lru_cache(maxsize=1)
+    @cached_method
     def get_organization(self):
         """Return organization determined by url kwarg."""
         if self.org_url_field not in self.kwargs:
@@ -88,12 +103,11 @@ class OrganizationMixin(CheckOrganizationsEnabled):
         """Add organization to context data."""
         context = super().get_context_data(**kwargs)
         organization = self.get_organization()
-        context['organization'] = organization
+        context["organization"] = organization
         return context
 
 
 class OrganizationTeamMixin(OrganizationMixin):
-
     """
     Add team query and instance methods for team related views.
 
@@ -109,34 +123,39 @@ class OrganizationTeamMixin(OrganizationMixin):
         This will either be team the user is a member of, or teams where the
         user is an owner of the organization.
         """
-        return Team.objects.member(self.request.user).filter(
-            organization=self.get_organization(),
-        ).order_by('name')
+        return (
+            Team.objects.member(self.request.user)
+            .filter(
+                organization=self.get_organization(),
+            )
+            .order_by("name")
+        )
 
-    @lru_cache(maxsize=1)
+    @cached_method
     def get_team(self):
         """Return team determined by url kwarg."""
         return get_object_or_404(
             self.get_team_queryset(),
-            slug=self.kwargs['team'],
+            slug=self.kwargs["team"],
         )
 
     def get_form(self, data=None, files=None, **kwargs):
         """Pass in organization to form class instance."""
-        kwargs['organization'] = self.get_organization()
+        kwargs["organization"] = self.get_organization()
         return self.form_class(data, files, **kwargs)
 
 
 # Base views
-class OrganizationView(CheckOrganizationsEnabled):
-
+class OrganizationView(SuccessMessageMixin, CheckOrganizationsEnabled):
     """Mixin for an organization view that doesn't have nested components."""
 
     model = Organization
-    lookup_field = 'slug'
-    lookup_url_field = 'slug'
     form_class = OrganizationForm
     admin_only = True
+
+    # Only relevant when mixed into
+    lookup_field = "slug"
+    lookup_url_field = "slug"
 
     def get_queryset(self):
         if self.admin_only:
@@ -144,7 +163,7 @@ class OrganizationView(CheckOrganizationsEnabled):
         return Organization.objects.for_user(user=self.request.user)
 
     def get_form(self, data=None, files=None, **kwargs):
-        kwargs['user'] = self.request.user
+        kwargs["user"] = self.request.user
         cls = self.get_form_class()
         return cls(data, files, **kwargs)
 
@@ -152,32 +171,28 @@ class OrganizationView(CheckOrganizationsEnabled):
         """Add onboarding context."""
         context = super().get_context_data(**kwargs)
         if not self.get_queryset().exists():
-            context['onboarding'] = True
+            context["onboarding"] = True
         return context
 
     def get_success_url(self):
         return reverse_lazy(
-            'organization_edit',
+            "organization_edit",
             args=[self.object.slug],
         )
 
 
-class OrganizationOwnerView(SuccessMessageMixin, OrganizationMixin):
-
+class OrganizationOwnerView(OrganizationMixin):
     """Mixin for views related to organization owners."""
 
     model = OrganizationOwner
     form_class = OrganizationOwnerForm
     admin_only = True
-    lookup_url_kwarg = 'owner'
+    lookup_url_kwarg = "owner"
 
     def get_queryset(self):
-        return (
-            OrganizationOwner.objects.filter(
-                organization=self.get_organization(),
-            )
-            .prefetch_related('owner')
-        )
+        return OrganizationOwner.objects.filter(
+            organization=self.get_organization(),
+        ).select_related("owner")
 
     def get_form(self, data=None, files=None, **kwargs):
         kwargs["organization"] = self.get_organization()
@@ -201,13 +216,12 @@ class OrganizationOwnerView(SuccessMessageMixin, OrganizationMixin):
 
     def get_success_url(self):
         return reverse_lazy(
-            'organization_owners',
+            "organization_owners",
             args=[self.get_organization().slug],
         )
 
 
-class OrganizationTeamView(SuccessMessageMixin, OrganizationTeamMixin):
-
+class OrganizationTeamView(OrganizationTeamMixin):
     """Mixin for views related to organization teams."""
 
     model = Team
@@ -221,7 +235,7 @@ class OrganizationTeamView(SuccessMessageMixin, OrganizationTeamMixin):
 
     def get_success_url(self):
         return reverse_lazy(
-            'organization_team_detail',
+            "organization_team_detail",
             args=[
                 self.get_organization().slug,
                 self.object.slug,
@@ -229,8 +243,7 @@ class OrganizationTeamView(SuccessMessageMixin, OrganizationTeamMixin):
         )
 
 
-class OrganizationTeamMemberView(SuccessMessageMixin, OrganizationTeamMixin):
-
+class OrganizationTeamMemberView(OrganizationTeamMixin):
     """Mixin for views related to organization team members."""
 
     model = TeamMember
@@ -243,7 +256,7 @@ class OrganizationTeamMemberView(SuccessMessageMixin, OrganizationTeamMixin):
         )
 
     def get_object(self):
-        return self.get_queryset().get(pk=self.kwargs['member'])
+        return self.get_queryset().get(pk=self.kwargs["member"])
 
     def _get_invitations(self):
         return Invitation.objects.for_object(self.get_team())
@@ -263,6 +276,6 @@ class OrganizationTeamMemberView(SuccessMessageMixin, OrganizationTeamMixin):
         organization = self.get_organization()
         team = self.get_team()
         return reverse_lazy(
-            'organization_team_detail',
+            "organization_team_detail",
             args=[organization.slug, team.slug],
         )

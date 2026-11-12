@@ -1,11 +1,16 @@
 """Support code for OAuth, including webhook support."""
 
 import structlog
-from django.contrib import messages
-from django.utils.translation import gettext_lazy as _
+from allauth.socialaccount.models import SocialAccount
+from allauth.socialaccount.providers.bitbucket_oauth2.provider import BitbucketOAuth2Provider
+from django.db.models import Q
 
 from readthedocs.integrations.models import Integration
-from readthedocs.oauth.services import BitbucketService, GitHubService, GitLabService
+from readthedocs.oauth.clients import get_oauth2_client
+from readthedocs.oauth.services import BitbucketService
+from readthedocs.oauth.services import GitHubService
+from readthedocs.oauth.services import GitLabService
+
 
 log = structlog.get_logger(__name__)
 
@@ -16,53 +21,32 @@ SERVICE_MAP = {
 }
 
 
-def update_webhook(project, integration, request=None):
-    """Update a specific project integration instead of brute forcing."""
-    # FIXME: this method supports ``request=None`` on its definition.
-    # However, it does not work when passing ``request=None`` as
-    # it uses that object without checking if it's ``None`` or not.
-    service_cls = SERVICE_MAP.get(integration.integration_type)
-    if service_cls is None:
-        return None
+def get_bitbucket_accounts_without_account_id():
+    """
+    Return Bitbucket accounts that don't have an ``account_id`` saved.
 
-    updated = False
-    if project.remote_repository:
-        remote_repository_relations = (
-            project.remote_repository.remote_repository_relations.filter(
-                account__isnull=False,
-                user=request.user
-            ).select_related('account')
-        )
+    These accounts can't be matched on login, since allauth identifies
+    Bitbucket accounts by their ``account_id``.
+    """
+    return SocialAccount.objects.filter(
+        # The key isn't present, or it's present with a null value.
+        Q(extra_data__account_id__isnull=True) | Q(extra_data__account_id=None),
+        provider=BitbucketOAuth2Provider.id,
+    )
 
-        for relation in remote_repository_relations:
-            service = service_cls(request.user, relation.account)
-            updated, __ = service.update_webhook(project, integration)
 
-            if updated:
-                break
-    else:
-        # The project was imported manually and doesn't have a RemoteRepository
-        # attached. We do brute force over all the accounts registered for this
-        # service
-        service_accounts = service_cls.for_user(request.user)
-        for service in service_accounts:
-            updated, __ = service.update_webhook(project, integration)
-            if updated:
-                break
-
-    if updated:
-        messages.success(request, _('Webhook activated'))
-        project.has_valid_webhook = True
-        project.save()
+def is_access_revoked(account):
+    """Check if the access token for the given account is revoked."""
+    client = get_oauth2_client(account)
+    if client is None:
         return True
 
-    messages.error(
-        request,
-        _(
-            'Webhook activation failed. '
-            'Make sure you have the necessary permissions.',
-        ),
-    )
-    project.has_valid_webhook = False
-    project.save()
+    provider = account.get_provider()
+    oauth2_adapter = provider.get_oauth2_adapter(request=provider.request)
+    test_url = oauth2_adapter.profile_url
+    resp = client.get(test_url)
+    # NOTE: This has only been tested for GitHub,
+    # check if Gitlab and Bitbucket return 401.
+    if resp.status_code == 401:
+        return True
     return False

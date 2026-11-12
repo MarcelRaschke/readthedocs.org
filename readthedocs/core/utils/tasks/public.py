@@ -1,24 +1,22 @@
-# -*- coding: utf-8 -*-
-
 """Celery tasks with publicly viewable status."""
 
-from celery import Task, states
+from celery import Task
+from celery import states
 from django.conf import settings
-
-from .retrieve import TaskNotFound, get_task_data
 
 
 __all__ = (
-    'PublicTask',
-    'TaskNoPermission',
-    'get_public_task_data',
+    "PublicTask",
+    "TaskNoPermission",
 )
 
-STATUS_UPDATES_ENABLED = not settings.CELERY_ALWAYS_EAGER
+STATUS_UPDATES_ENABLED = not settings.CELERY_TASK_ALWAYS_EAGER
 
 
+# pylint: disable=abstract-method
+# pylint: disable=broad-except
+# pylint: disable=invalid-name
 class PublicTask(Task):
-
     """
     Encapsulates common behaviour to expose a task publicly.
 
@@ -35,9 +33,9 @@ class PublicTask(Task):
         """Return tuple with state to be set next and results task."""
         state = states.STARTED
         info = {
-            'task_name': self.name,
-            'context': self.request.get('permission_context', {}),
-            'public_data': self.request.get('public_data', {}),
+            "task_name": self.name,
+            "context": self.request.get("permission_context", {}),
+            "public_data": self.request.get("public_data", {}),
         }
         return state, info
 
@@ -84,7 +82,7 @@ class PublicTask(Task):
 
         _, info = self.get_task_data()
         if error and exception_raised:
-            info['error'] = str(exception_raised)
+            info["error"] = str(exception_raised)
         elif result is not None:
             self.set_public_data(result)
 
@@ -115,41 +113,8 @@ class PublicTask(Task):
 
 
 class TaskNoPermission(Exception):
-
     def __init__(self, task_id, *args, **kwargs):
-        message = 'No permission to access task with id {id}'.format(
+        message = "No permission to access task with id {id}".format(
             id=task_id,
         )
         super().__init__(message, *args, **kwargs)
-
-
-def get_public_task_data(request, task_id):
-    """
-    Return task details as tuple.
-
-    Will raise `TaskNoPermission` if `request` has no permission to access info
-    of the task with id `task_id`. This is also the case of no task with the
-    given id exists.
-
-    :returns: (task name, task state, public data, error message)
-    :rtype: (str, str, dict, str)
-    """
-    try:
-        task, state, info = get_task_data(task_id)
-    except TaskNotFound:
-        # No task info has been found act like we don't have permission to see
-        # the results.
-        raise TaskNoPermission(task_id)
-
-    if not hasattr(task, 'check_permission'):
-        raise TaskNoPermission(task_id)
-
-    context = info.get('context', {})
-    if not task.check_permission(request, state, context):
-        raise TaskNoPermission(task_id)
-    return (
-        task.name,
-        state,
-        info.get('public_data', {}),
-        info.get('error', None),
-    )

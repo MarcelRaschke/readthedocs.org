@@ -1,27 +1,46 @@
+"""
+The ``director`` module can be seen as the entrypoint of the build process.
+
+It "directs" all of the high-level build jobs:
+
+* checking out the repo
+* setting up the environment
+* fetching instructions etc.
+"""
+
+import datetime
 import os
-import shutil
 import tarfile
 
 import structlog
+import yaml
 from django.conf import settings
-from django.utils.translation import gettext_lazy as _
 
 from readthedocs.builds.constants import EXTERNAL
+from readthedocs.config.config import CONFIG_FILENAME_REGEX
+from readthedocs.config.find import find_one
+from readthedocs.core.utils.filesystem import safe_open
+from readthedocs.core.utils.objects import get_dotted_attribute
 from readthedocs.doc_builder.config import load_yaml_config
 from readthedocs.doc_builder.exceptions import BuildUserError
 from readthedocs.doc_builder.loader import get_builder_class
-from readthedocs.doc_builder.python_environments import Conda, Virtualenv
-from readthedocs.projects.constants import BUILD_COMMANDS_OUTPUT_PATH_HTML, GENERIC
+from readthedocs.doc_builder.python_environments import Conda
+from readthedocs.doc_builder.python_environments import UvEnv
+from readthedocs.doc_builder.python_environments import Virtualenv
+from readthedocs.projects.constants import BUILD_COMMANDS_OUTPUT_PATH_HTML
+from readthedocs.projects.constants import GENERIC
 from readthedocs.projects.exceptions import RepositoryError
-from readthedocs.projects.models import Feature
-from readthedocs.projects.signals import after_build, before_build, before_vcs
-from readthedocs.storage import build_tools_storage
+from readthedocs.projects.notifications import MESSAGE_PROJECT_SSH_KEY_WITH_WRITE_ACCESS
+from readthedocs.projects.signals import before_build
+from readthedocs.projects.signals import before_vcs
+from readthedocs.projects.tasks.storage import StorageType
+from readthedocs.projects.tasks.storage import get_storage
+
 
 log = structlog.get_logger(__name__)
 
 
 class BuildDirector:
-
     """
     Encapsulates all the logic to perform a build for user's documentation.
 
@@ -63,12 +82,11 @@ class BuildDirector:
             os.makedirs(self.data.project.doc_path)
 
         if not self.data.project.vcs_class():
-            raise RepositoryError(
-                _('Repository type "{repo_type}" unknown').format(
-                    repo_type=self.data.project.repo_type,
-                ),
-            )
+            raise RepositoryError(RepositoryError.UNSUPPORTED_VCS)
 
+        # This signal is used to setup the SSH key on .com.
+        # SECURITY: don't run user code before setting up the SSH key,
+        # otherwise a malicious user could exfiltrate the private SSH key.
         before_vcs.send(
             sender=self.data.version,
             environment=self.vcs_environment,
@@ -77,10 +95,8 @@ class BuildDirector:
         # Create the VCS repository where all the commands are going to be
         # executed for a particular VCS type
         self.vcs_repository = self.data.project.vcs_repo(
-            version=self.data.version.slug,
+            version=self.data.version,
             environment=self.vcs_environment,
-            verbose_name=self.data.version.verbose_name,
-            version_type=self.data.version.type,
         )
 
         # We can't do too much on ``pre_checkout`` because we haven't
@@ -93,7 +109,6 @@ class BuildDirector:
         #
         # self.run_build_job("pre_checkout")
         self.checkout()
-        self.run_build_job("post_checkout")
 
         commit = self.data.build_commit or self.vcs_repository.commit
         if commit:
@@ -105,20 +120,18 @@ class BuildDirector:
             version=self.data.version,
             build=self.data.build,
             environment=self.get_vcs_env_vars(),
-            # Force the ``container_image`` to use one that has the latest
-            # ca-certificate package which is compatible with Lets Encrypt
-            container_image=settings.RTD_DOCKER_BUILD_SETTINGS["os"]["ubuntu-20.04"],
+            container_image=settings.RTD_DOCKER_CLONE_IMAGE,
+            api_client=self.data.api_client,
         )
 
     def create_build_environment(self):
-        use_gvisor = self.data.config.using_build_tools and self.data.config.build.jobs
         self.build_environment = self.data.environment_class(
             project=self.data.project,
             version=self.data.version,
             config=self.data.config,
             build=self.data.build,
             environment=self.get_build_env_vars(),
-            use_gvisor=use_gvisor,
+            api_client=self.data.api_client,
         )
 
     def setup_environment(self):
@@ -133,6 +146,8 @@ class BuildDirector:
         language_environment_cls = Virtualenv
         if self.data.config.is_using_conda:
             language_environment_cls = Conda
+        elif self.data.config.is_using_uv:
+            language_environment_cls = UvEnv
 
         self.language_environment = language_environment_cls(
             version=self.data.version,
@@ -140,10 +155,9 @@ class BuildDirector:
             config=self.data.config,
         )
 
-        # TODO: check if `before_build` and `after_build` are still useful
-        # (maybe in commercial?)
-        #
-        # I didn't find they are used anywhere, we should probably remove them
+        # This signal is used to setup the SSH key on .com.
+        # SECURITY: don't run user code before setting up the SSH key,
+        # otherwise a malicious user could exfiltrate the private SSH key.
         before_build.send(
             sender=self.data.version,
             environment=self.build_environment,
@@ -154,8 +168,7 @@ class BuildDirector:
         self.run_build_job("post_system_dependencies")
 
         # Install all ``build.tools`` specified by the user
-        if self.data.config.using_build_tools:
-            self.install_build_tools()
+        self.install_build_tools()
 
         self.run_build_job("pre_create_environment")
         self.create_environment()
@@ -164,10 +177,6 @@ class BuildDirector:
         self.run_build_job("pre_install")
         self.install()
         self.run_build_job("post_install")
-
-        # TODO: remove this and document how to do it on `build.jobs.post_install`
-        if self.data.project.has_feature(Feature.LIST_PACKAGES_INSTALLED_ENV):
-            self.language_environment.list_packages_installed()
 
     def build(self):
         """
@@ -178,37 +187,129 @@ class BuildDirector:
         3. build PDF
         4. build ePub
         """
-
         self.run_build_job("pre_build")
 
-        self.data.outcomes["html"] = self.build_html()
-        self.data.outcomes["search"] = self.is_type_sphinx()
-        self.data.outcomes["localmedia"] = self.build_htmlzip()
-        self.data.outcomes["pdf"] = self.build_pdf()
-        self.data.outcomes["epub"] = self.build_epub()
+        # Build all formats
+        self.build_html()
+        self.build_htmlzip()
+        self.build_pdf()
+        self.build_epub()
 
         self.run_build_job("post_build")
-
-        after_build.send(
-            sender=self.data.version,
-        )
+        self.store_readthedocs_build_yaml()
 
     # VCS checkout
     def checkout(self):
-        log.info(
-            "Clonning repository.",
-        )
+        """Checkout Git repo and load build config file."""
+
+        log.info("Cloning and fetching.")
         self.vcs_repository.update()
 
-        identifier = self.data.build_commit or self.data.version.identifier
-        log.info("Checking out.", identifier=identifier)
-        self.vcs_repository.checkout(identifier)
+        # Check if the key has write access to the repository (RTD Business only).
+        # This check is done immediately after clone step, and before running any
+        # commands that make use of user given input (like the post_checkout job).
+        has_ssh_key_with_write_access = False
+        if settings.ALLOW_PRIVATE_REPOS:
+            has_ssh_key_with_write_access = self.vcs_repository.has_ssh_key_with_write_access()
+            if has_ssh_key_with_write_access != self.data.project.has_ssh_key_with_write_access:
+                self.data.api_client.project(self.data.project.pk).patch(
+                    {"has_ssh_key_with_write_access": has_ssh_key_with_write_access}
+                )
 
-        self.data.config = load_yaml_config(version=self.data.version)
+            now = datetime.datetime.now(tz=datetime.timezone.utc)
+            hard_failure = now >= datetime.datetime(
+                2025, 12, 1, 0, 0, 0, tzinfo=datetime.timezone.utc
+            )
+            if has_ssh_key_with_write_access:
+                if hard_failure and settings.RTD_ENFORCE_BROWNOUTS_FOR_DEPRECATIONS:
+                    raise BuildUserError(BuildUserError.SSH_KEY_WITH_WRITE_ACCESS)
+                else:
+                    self.attach_notification(
+                        attached_to=f"project/{self.data.project.pk}",
+                        message_id=MESSAGE_PROJECT_SSH_KEY_WITH_WRITE_ACCESS,
+                        dismissable=True,
+                    )
+
+        # Get the default branch of the repository if the project doesn't
+        # have an explicit default branch set and we are building latest.
+        # The identifier from latest will be updated with this value
+        # if the build succeeds.
+        is_latest_without_default_branch = (
+            self.data.version.is_machine_latest and not self.data.project.default_branch
+        )
+        if is_latest_without_default_branch:
+            self.data.default_branch = self.data.build_director.vcs_repository.get_default_branch()
+            log.info(
+                "Default branch for the repository detected.",
+                default_branch=self.data.default_branch,
+            )
+
+        # We can skip the checkout step since we just cloned the repository,
+        # and the default branch is already checked out.
+        if not is_latest_without_default_branch:
+            identifier = self.data.build_commit or self.data.version.identifier
+            log.info("Checking out.", identifier=identifier)
+            self.vcs_repository.checkout(identifier)
+
+        # The director is responsible for understanding which config file to use for a build.
+        # In order to reproduce a build 1:1, we may use readthedocs_yaml_path defined by the build
+        # instead of per-version or per-project.
+        # Use the below line to fetch the readthedocs_yaml_path defined per-build.
+        # custom_config_file = self.data.build.get("readthedocs_yaml_path", None)
+        custom_config_file = None
+
+        # This logic can be extended with version-specific config files
+        if not custom_config_file and self.data.version.project.readthedocs_yaml_path:
+            custom_config_file = self.data.version.project.readthedocs_yaml_path
+
+        if custom_config_file:
+            log.info("Using a custom .readthedocs.yaml file.", path=custom_config_file)
+
+        checkout_path = self.data.project.checkout_path(self.data.version.slug)
+        default_config_file = find_one(checkout_path, CONFIG_FILENAME_REGEX)
+        final_config_file = custom_config_file or default_config_file
+
+        # Output the path for the config file used.
+        # This works as confirmation for us & the user about which file is used,
+        # as well as the fact that *any* config file is used.
+        if final_config_file:
+            self.vcs_environment.run(
+                "cat",
+                # Show user the relative path to the config file
+                # TODO: Have our standard path replacement code catch this.
+                # https://github.com/readthedocs/readthedocs.org/pull/10413#discussion_r1230765843
+                final_config_file.replace(checkout_path + "/", ""),
+                cwd=checkout_path,
+            )
+
+        self.data.config = load_yaml_config(
+            version=self.data.version,
+            readthedocs_yaml_path=custom_config_file,
+        )
         self.data.build["config"] = self.data.config.as_dict()
+        self.data.build["readthedocs_yaml_path"] = custom_config_file
 
-        if self.vcs_repository.supports_submodules:
-            self.vcs_repository.update_submodules(self.data.config)
+        # Raise a build error if the project is not using a config file or using v1
+        if self.data.config.version not in ("2", 2):
+            raise BuildUserError(BuildUserError.NO_CONFIG_FILE_DEPRECATED)
+
+        # Raise a build error if the project is using "build.image" on their config file
+        build_config_key = self.data.config.source_config.get("build", {})
+        if "image" in build_config_key:
+            raise BuildUserError(BuildUserError.BUILD_IMAGE_CONFIG_KEY_DEPRECATED)
+
+        # TODO: move this validation to the Config object once we are settled here
+        if "image" not in build_config_key and "os" not in build_config_key:
+            raise BuildUserError(BuildUserError.BUILD_OS_REQUIRED)
+
+        self.vcs_repository.update_submodules(self.data.config)
+
+        # If the config has a post_checkout job, we stop the build,
+        # as it could be abused to write to the repository.
+        if has_ssh_key_with_write_access and get_dotted_attribute(
+            self.data.config, "build.jobs.post_checkout", None
+        ):
+            raise BuildUserError(BuildUserError.SSH_KEY_WITH_WRITE_ACCESS)
 
     # System dependencies (``build.apt_packages``)
     # NOTE: `system_dependencies` should not be possible to override by the
@@ -248,20 +349,45 @@ class BuildDirector:
 
     # Language environment
     def create_environment(self):
+        if self.data.config.build.jobs.create_environment is not None:
+            self.run_build_job("create_environment")
+            return
+
+        # If the builder is generic, we don't have to install Sphinx/MkDocs dependencies by default.
+        # However, if the user is using UV, we need to call `uv sync` or `uv pip install`
+        if self.data.config.doctype == GENERIC and not self.data.config.is_using_uv:
+            return
+
         self.language_environment.setup_base()
 
     # Install
     def install(self):
+        if self.data.config.build.jobs.install is not None:
+            self.run_build_job("install")
+            return
+
+        # If the builder is generic, we don't have to install Sphinx/MkDocs dependencies by default.
+        # However, if the user is using UV, we need to call `uv sync` or `uv pip install`
+        if self.data.config.doctype == GENERIC and not self.data.config.is_using_uv:
+            return
+
         self.language_environment.install_core_requirements()
         self.language_environment.install_requirements()
 
     # Build
     def build_html(self):
+        if self.data.config.build.jobs.build.html is not None:
+            self.run_build_job("build.html")
+            return
         return self.build_docs_class(self.data.config.doctype)
 
     def build_pdf(self):
         if "pdf" not in self.data.config.formats or self.data.version.type == EXTERNAL:
             return False
+
+        if self.data.config.build.jobs.build.pdf is not None:
+            self.run_build_job("build.pdf")
+            return
 
         # Mkdocs has no pdf generation currently.
         if self.is_type_sphinx():
@@ -270,11 +396,12 @@ class BuildDirector:
         return False
 
     def build_htmlzip(self):
-        if (
-            "htmlzip" not in self.data.config.formats
-            or self.data.version.type == EXTERNAL
-        ):
+        if "htmlzip" not in self.data.config.formats or self.data.version.type == EXTERNAL:
             return False
+
+        if self.data.config.build.jobs.build.htmlzip is not None:
+            self.run_build_job("build.htmlzip")
+            return
 
         # We don't generate a zip for mkdocs currently.
         if self.is_type_sphinx():
@@ -284,6 +411,10 @@ class BuildDirector:
     def build_epub(self):
         if "epub" not in self.data.config.formats or self.data.version.type == EXTERNAL:
             return False
+
+        if self.data.config.build.jobs.build.epub is not None:
+            self.run_build_job("build.epub")
+            return
 
         # Mkdocs has no epub generation currently.
         if self.is_type_sphinx():
@@ -314,14 +445,17 @@ class BuildDirector:
                 - python path/to/myscript.py
               pre_build:
                 - sed -i **/*.rst -e "s|{version}|v3.5.1|g"
+              build:
+                html:
+                  - make html
+                pdf:
+                  - make pdf
 
         In this case, `self.data.config.build.jobs.pre_build` will contains
         `sed` command.
         """
-        if (
-            getattr(self.data.config.build, "jobs", None) is None
-            or getattr(self.data.config.build.jobs, job, None) is None
-        ):
+        commands = get_dotted_attribute(self.data.config, f"build.jobs.{job}", None)
+        if not commands:
             return
 
         cwd = self.data.project.checkout_path(self.data.version.slug)
@@ -329,12 +463,35 @@ class BuildDirector:
         if job not in ("pre_checkout", "post_checkout"):
             environment = self.build_environment
 
-        commands = getattr(self.data.config.build.jobs, job, [])
         for command in commands:
-            environment.run(*command.split(), escape_command=False, cwd=cwd)
+            environment.run(command, escape_command=False, cwd=cwd)
+
+    def check_old_output_directory(self):
+        """
+        Check if there the directory '_build/html' exists and fail the build if so.
+
+        Read the Docs used to build artifacts into '_build/html' and there are
+        some projects with this path hardcoded in their files. Those builds are
+        having unexpected behavior since we are not using that path anymore.
+
+        In case we detect they are keep using that path, we fail the build
+        explaining this.
+        """
+        command = self.build_environment.run(
+            "test",
+            "-x",
+            "_build/html",
+            cwd=self.data.project.checkout_path(self.data.version.slug),
+            record=False,
+        )
+        if command.exit_code == 0:
+            log.warning("Directory '_build/html' exists. This may lead to unexpected behavior.")
+            raise BuildUserError(BuildUserError.BUILD_OUTPUT_OLD_DIRECTORY_USED)
 
     def run_build_commands(self):
-        reshim_commands = (
+        """Runs each build command in the build environment."""
+
+        python_reshim_commands = (
             {"pip", "install"},
             {"conda", "create"},
             {"conda", "install"},
@@ -342,19 +499,21 @@ class BuildDirector:
             {"mamba", "install"},
             {"poetry", "install"},
         )
+        rust_reshim_commands = ({"cargo", "install"},)
+
         cwd = self.data.project.checkout_path(self.data.version.slug)
         environment = self.build_environment
         for command in self.data.config.build.commands:
-            environment.run(*command.split(), escape_command=False, cwd=cwd)
+            environment.run(command, escape_command=False, cwd=cwd)
 
             # Execute ``asdf reshim python`` if the user is installing a
             # package since the package may contain an executable
             # See https://github.com/readthedocs/readthedocs.org/pull/9150#discussion_r882849790
-            for reshim_command in reshim_commands:
+            for python_reshim_command in python_reshim_commands:
                 # Convert tuple/list into set to check reshim command is a
                 # subset of the command itself. This is to find ``pip install``
                 # but also ``pip -v install`` and ``python -m pip install``
-                if reshim_command.issubset(command.split()):
+                if python_reshim_command.issubset(command.split()):
                     environment.run(
                         *["asdf", "reshim", "python"],
                         escape_command=False,
@@ -362,26 +521,25 @@ class BuildDirector:
                         record=False,
                     )
 
-        # Copy files to artifacts path so they are uploaded to S3
-        target = self.data.project.artifact_path(
-            version=self.data.version.slug,
-            type_=GENERIC,
-        )
-        artifacts_path = os.path.join(cwd, BUILD_COMMANDS_OUTPUT_PATH_HTML)
-        if not os.path.exists(artifacts_path):
-            raise BuildUserError(BuildUserError.BUILD_COMMANDS_WITHOUT_OUTPUT)
+            # Do same for Rust
+            for rust_reshim_command in rust_reshim_commands:
+                if rust_reshim_command.issubset(command.split()):
+                    environment.run(
+                        *["asdf", "reshim", "rust"],
+                        escape_command=False,
+                        cwd=cwd,
+                        record=False,
+                    )
 
-        shutil.copytree(
-            artifacts_path,
-            target,
-        )
+        html_output_path = os.path.join(cwd, BUILD_COMMANDS_OUTPUT_PATH_HTML)
+        if not os.path.exists(html_output_path):
+            raise BuildUserError(BuildUserError.BUILD_COMMANDS_WITHOUT_OUTPUT)
 
         # Update the `Version.documentation_type` to match the doctype defined
         # by the config file. When using `build.commands` it will be `GENERIC`
         self.data.version.documentation_type = self.data.config.doctype
 
-        # Mark HTML as the only outcome available for this type of builder
-        self.data.outcomes["html"] = True
+        self.store_readthedocs_build_yaml()
 
     def install_build_tools(self):
         """
@@ -410,20 +568,37 @@ class BuildDirector:
                 record=False,
             )
 
+        build_tools_storage = get_storage(
+            build_id=self.data.build["id"],
+            api_client=self.data.api_client,
+            storage_type=StorageType.build_tools,
+        )
+
         for tool, version in self.data.config.build.tools.items():
             full_version = version.full_version  # e.g. 3.9 -> 3.9.7
 
             # TODO: generate the correct path for the Python version
             # see https://github.com/readthedocs/readthedocs.org/pull/8447#issuecomment-911562267
             # tool_path = f'{self.config.build.os}/{tool}/2021-08-30/{full_version}.tar.gz'
-            tool_path = f"{self.data.config.build.os}-{tool}-{full_version}.tar.gz"
+
+            build_os = self.data.config.build.os
+            if build_os == "ubuntu-lts-latest":
+                _, build_os = settings.RTD_DOCKER_BUILD_SETTINGS["os"]["ubuntu-lts-latest"].split(
+                    ":"
+                )
+
+            tool_path = f"{build_os}-{tool}-{full_version}.tar.gz"
             tool_version_cached = build_tools_storage.exists(tool_path)
             if tool_version_cached:
                 remote_fd = build_tools_storage.open(tool_path, mode="rb")
                 with tarfile.open(fileobj=remote_fd) as tar:
                     # Extract it on the shared path between host and Docker container
                     extract_path = os.path.join(self.data.project.doc_path, "tools")
-                    tar.extractall(extract_path)
+
+                    # NOTE: we are using `filter="fully_trusted"` to avoid the following error:
+                    # AbsoluteLink: 'miniforge3-25.11.0-1/_conda' is a link to an absolute path
+                    # We should find a better solution.
+                    tar.extractall(extract_path, filter="fully_trusted")
 
                     # Move the extracted content to the ``asdf`` installation
                     cmd = [
@@ -487,6 +662,24 @@ class BuildDirector:
                 record=False,
             )
 
+            # Install UV if the tool is Python and the user has selected to use UV
+            if tool == "python" and self.data.config.is_using_uv:
+                cmd = ["asdf", "plugin", "add", "uv"]
+                self.build_environment.run(
+                    *cmd,
+                    record=True,
+                )
+                cmd = ["asdf", "install", "uv", "latest"]
+                self.build_environment.run(
+                    *cmd,
+                    record=True,
+                )
+                cmd = ["asdf", "global", "uv", "latest"]
+                self.build_environment.run(
+                    *cmd,
+                    record=True,
+                )
+
             if all(
                 [
                     tool == "python",
@@ -501,6 +694,14 @@ class BuildDirector:
                     self.data.config.python_interpreter not in ("conda", "mamba"),
                 ]
             ):
+                # We cap setuptools to avoid breakage of projects
+                # relying on setup.py invokations,
+                # see https://github.com/readthedocs/readthedocs.org/issues/8659
+                setuptools_version = (
+                    "setuptools<58.3.0"
+                    if self.data.config.is_using_setup_py_install
+                    else "setuptools"
+                )
                 # Install our own requirements if the version is compiled
                 cmd = [
                     "python",
@@ -508,10 +709,7 @@ class BuildDirector:
                     "install",
                     "-U",
                     "virtualenv",
-                    # We cap setuptools to avoid breakage of projects
-                    # relying on setup.py invokations,
-                    # see https://github.com/readthedocs/readthedocs.org/issues/8659
-                    "setuptools<58.3.0",
+                    setuptools_version,
                 ]
                 self.build_environment.run(
                     *cmd,
@@ -529,25 +727,42 @@ class BuildDirector:
         only raise a warning exception here. A hard error will halt the build
         process.
         """
+        # If the builder is generic, we have nothing to do here,
+        # as the commnads are provided by the user.
+        if builder_class == GENERIC:
+            return
+
         builder = get_builder_class(builder_class)(
             build_env=self.build_environment,
             python_env=self.language_environment,
         )
 
         if builder_class == self.data.config.doctype:
-            builder.append_conf()
+            builder.show_conf()
             self.data.version.documentation_type = builder.get_final_doctype()
 
         success = builder.build()
-        builder.move()
-
         return success
+
+    def _add_git_ssh_command_env_var(self, env):
+        if settings.ALLOW_PRIVATE_REPOS:
+            # Set GIT_SSH_COMMAND to use ssh with options that disable host key checking
+            # -o StrictHostKeyChecking=no: Don't prompt for host verification
+            # -o UserKnownHostsFile=/dev/null: Don't save host keys
+            git_ssh_command = "ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null"
+            env.update(
+                {
+                    "GIT_SSH_COMMAND": git_ssh_command,
+                }
+            )
 
     def get_vcs_env_vars(self):
         """Get environment variables to be included in the VCS setup step."""
         env = self.get_rtd_env_vars()
         # Don't prompt for username, this requires Git 2.3+
         env["GIT_TERMINAL_PROMPT"] = "0"
+        env["READTHEDOCS_GIT_CLONE_TOKEN"] = self.data.project.clone_token
+        self._add_git_ssh_command_env_var(env)
         return env
 
     def get_rtd_env_vars(self):
@@ -559,6 +774,17 @@ class BuildDirector:
             "READTHEDOCS_VERSION_NAME": self.data.version.verbose_name,
             "READTHEDOCS_PROJECT": self.data.project.slug,
             "READTHEDOCS_LANGUAGE": self.data.project.language,
+            "READTHEDOCS_REPOSITORY_PATH": self.data.project.checkout_path(self.data.version.slug),
+            "READTHEDOCS_OUTPUT": os.path.join(
+                self.data.project.checkout_path(self.data.version.slug), "_readthedocs/"
+            ),
+            "READTHEDOCS_GIT_CLONE_URL": self.data.project.repo,
+            # TODO: we don't have access to the database from the builder.
+            # We need to find a way to expose HTML_URL here as well.
+            # "READTHEDOCS_GIT_HTML_URL": self.data.project.remote_repository.html_url,
+            "READTHEDOCS_GIT_IDENTIFIER": self.data.version.git_identifier,
+            "READTHEDOCS_GIT_COMMIT_HASH": self.data.build["commit"],
+            "READTHEDOCS_PRODUCTION_DOMAIN": settings.PRODUCTION_DOMAIN,
         }
         return env
 
@@ -572,9 +798,8 @@ class BuildDirector:
         if self.data.config.conda is not None:
             env.update(
                 {
-                    "CONDA_ENVS_PATH": os.path.join(
-                        self.data.project.doc_path, "conda"
-                    ),
+                    # NOTE: should these be prefixed with "READTHEDOCS_"?
+                    "CONDA_ENVS_PATH": os.path.join(self.data.project.doc_path, "conda"),
                     "CONDA_DEFAULT_ENV": self.data.version.slug,
                     "BIN_PATH": os.path.join(
                         self.data.project.doc_path,
@@ -584,6 +809,7 @@ class BuildDirector:
                     ),
                 }
             )
+
         else:
             env.update(
                 {
@@ -596,13 +822,45 @@ class BuildDirector:
                 }
             )
 
+        # UV_PROJECT_ENVIRONMENT and READTHEDOCS_VIRTUALENV_PATH are the same
+        venv_path = os.path.join(
+            self.data.project.doc_path,
+            "envs",
+            self.data.version.slug,
+        )
+        if self.data.config.is_using_uv:
+            checkout_path = self.data.project.checkout_path(self.data.version.slug)
+            try:
+                # UV_PROJECT has to be an absolute path because we run `uv venv` and `uv run`
+                # from different `cwd` directories.
+                UV_PROJECT = os.path.join(checkout_path, self.data.config.python.install[0].path)
+            except AttributeError, IndexError, TypeError:
+                UV_PROJECT = checkout_path
+
+            env.update(
+                {
+                    # Point UV_PYTHON to the Python binary inside the virtualenv created by UV.
+                    # This is used by `uv run/sync` but also by `uv pip install` to find the correct Python binary to use.
+                    "UV_PYTHON": os.path.join(venv_path, "bin", "python"),
+                    "UV_PROJECT": UV_PROJECT,
+                    "UV_PROJECT_ENVIRONMENT": venv_path,
+                }
+            )
+
+        env.update(
+            {
+                "READTHEDOCS_CANONICAL_URL": self.data.version.canonical_url,
+                "READTHEDOCS_VIRTUALENV_PATH": venv_path,
+            }
+        )
+
+        self._add_git_ssh_command_env_var(env)
+
         # Update environment from Project's specific environment variables,
         # avoiding to expose private environment variables
         # if the version is external (i.e. a PR build).
         env.update(
-            self.data.project.environment_variables(
-                public_only=self.data.version.is_external
-            )
+            self.data.project.environment_variables(public_only=self.data.version.is_external)
         )
 
         return env
@@ -610,3 +868,65 @@ class BuildDirector:
     def is_type_sphinx(self):
         """Is documentation type Sphinx."""
         return "sphinx" in self.data.config.doctype
+
+    def store_readthedocs_build_yaml(self):
+        # load YAML from user
+        yaml_path = os.path.join(
+            self.data.project.artifact_path(version=self.data.version.slug, type_="html"),
+            "readthedocs-build.yaml",
+        )
+
+        if not os.path.exists(yaml_path):
+            log.debug("Build output YAML file (readtehdocs-build.yaml) does not exist.")
+            return
+
+        try:
+            with safe_open(yaml_path, "r") as f:
+                data = yaml.safe_load(f)
+        except Exception:
+            # NOTE: skip this work for now until we decide whether or not this
+            # YAML file is required.
+            #
+            # NOTE: decide whether or not we want this
+            # file to be mandatory and raise an exception here.
+            return
+
+        log.info("readthedocs-build.yaml loaded.", path=yaml_path)
+
+        # TODO: validate the YAML generated by the user
+        # self._validate_readthedocs_build_yaml(data)
+
+        # Copy the YAML data into `Version.build_data`.
+        # It will be saved when the API is hit.
+        # This data will be used by the `/_/readthedocs-config.json` API endpoint.
+        self.data.version.build_data = data
+
+    def attach_notification(
+        self,
+        attached_to,
+        message_id,
+        format_values=None,
+        state="unread",
+        dismissable=False,
+        news=False,
+    ):
+        """
+        Attach a notification to build in progress using the APIv2.
+
+        :param attached_to: The object to which the notification is attached.
+         It should have the form of `project/{project_id}` or `build/{build_id}`.
+        """
+
+        format_values = format_values or {}
+        # NOTE: we are using APIv2 here because it uses BuildAPIKey authentication,
+        # which is not currently supported by APIv3.
+        self.data.api_client.notifications.post(
+            {
+                "attached_to": attached_to,
+                "message_id": message_id,
+                "state": state,  # Optional
+                "dismissable": dismissable,
+                "news": news,
+                "format_values": format_values,
+            }
+        )

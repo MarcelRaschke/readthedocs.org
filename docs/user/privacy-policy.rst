@@ -4,7 +4,7 @@
 Privacy Policy
 ==============
 
-Effective date: **September  30, 2019**
+Effective date: **February 21, 2023**
 
 Welcome to Read the Docs.
 At Read the Docs, we believe in protecting the privacy of our
@@ -34,19 +34,19 @@ readthedocs.org ("Read the Docs Community")
     writing and distributing technical documentation.
     This Privacy Policy applies to this site in full without reservation.
 
-readthedocs.com ("Read the Docs for Business")
+readthedocs.com ("Read the Docs Business")
     This website is a commercial hosted offering for hosting private
     documentation for corporate clients.
     This Privacy Policy applies to this site in full without reservation.
 
 readthedocs.io, readthedocs-hosted.com, and other domains ("Documentation Sites")
-    These websites are where Read the Docs hosts documentation (":ref:`User-Generated Content <terms-of-service:User-Generated Content>`")
+    These websites are where Read the Docs hosts documentation (`User-Generated Content <https://about.readthedocs.com/terms-of-service/#user-generated-content>`_)
     on behalf of documentation authors.
     A best effort is made to apply
     this Privacy Policy to these sites but the documentation
     may contain content and files created by documentation authors.
 
-All use of Read the Docs is subject to this Privacy Policy, together with our :doc:`Terms of service <terms-of-service>`.
+All use of Read the Docs is subject to this Privacy Policy, together with our `Terms of Service <https://about.readthedocs.com/terms-of-service/>`_.
 
 
 What information Read the Docs collects and why
@@ -104,7 +104,7 @@ Why do we collect this information?
 - We limit our use of your User Personal Information to the purposes listed in this Privacy Statement.
   If we need to use your User Personal Information for other purposes, we will ask your permission first.
   You can always see what information we have in your
-  `user account <https://readthedocs.org/accounts/edit/>`__.
+  `user account <https://app.readthedocs.org/accounts/edit/>`__.
 
 What information Read the Docs does not collect
 -----------------------------------------------
@@ -117,7 +117,7 @@ anyone (including us) may view their contents.
 If you have included private or sensitive information in your Documentation Site,
 such as email addresses, that information may be indexed by search engines or used by third parties.
 
-Read the Docs for Business may host :ref:`private projects <terms-of-service:Private projects>` which we treat as confidential
+Read the Docs Business may host `private projects <https://about.readthedocs.com/terms-of-service/#private-projects>`_ which we treat as confidential
 and we only access them for support reasons, with your consent, or if required to for security reasons
 
 If you're a **child under the age of 13**, you may not have an account on Read the Docs.
@@ -176,8 +176,8 @@ or become a subscriber to Read the Docs' commercial hosting product,
 your payment information and details will be processed by Stripe.
 Read the Docs does not store your payment information.
 
-.. _Gold membership: https://readthedocs.org/accounts/gold/
-.. _Supporter: https://readthedocs.org/sustainability/
+.. _Gold membership: https://app.readthedocs.org/accounts/gold/
+.. _Supporter: https://app.readthedocs.org/sustainability/
 
 Site monitoring
 +++++++++++++++
@@ -192,14 +192,13 @@ Analytics
 +++++++++
 
 We go into detail on analytics in a
-:ref:`separate section specific to analytics <privacy-policy:Google Analytics>`.
+:ref:`separate section specific to analytics <privacy-policy:Plausible>`.
 
-Support Desk
+Support desk
 ++++++++++++
 
-Read the Docs uses Intercom to manage support requests
-for documentation hosted through Read the Docs for Business.
-If you request support -- typically via email -- Intercom may process
+Read the Docs uses Front to manage support requests.
+If you request support -- typically via email -- Front may process
 your contact information.
 
 Email newsletter
@@ -214,7 +213,7 @@ You can manage your email subscription
 including unsubscribing and deleting your records with MailerLite.
 There is a link to do so in the footer of any newsletter you receive from us.
 
-Public Information on Read the Docs
+Public information on Read the Docs
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
 Most of Read the Docs is public-facing including
@@ -237,14 +236,12 @@ and the `EFF's DNT Policy`_.
 For Read the Docs, this means:
 
 * We **do not** do behavioral ad targeting regardless of your DNT preference.
-* When DNT is enabled, both logged-in and logged-out users
-  are considered opted-out of :ref:`analytics <privacy-policy:Google Analytics>`.
 * Regardless of DNT preference, our logs that contain IP addresses
   and user agent strings are deleted after 10 days unless a DNT exception applies.
 * Our full DNT policy is `available here`_.
 
 Our DNT policy applies without reservation
-to Read the Docs Community and Read the Docs for Business.
+to Read the Docs Community and Read the Docs Business.
 A best effort is made to apply this to Documentation Sites,
 but we do not have complete control over the contents of these sites.
 
@@ -258,7 +255,7 @@ For more details about DNT, visit `All About Do Not Track`_.
 
 .. _W3C's tracking preference expression: https://www.w3.org/TR/tracking-dnt/
 .. _EFF's DNT Policy: https://www.eff.org/issues/do-not-track
-.. _available here: https://readthedocs.org/.well-known/dnt-policy.txt
+.. _available here: https://app.readthedocs.org/.well-known/dnt-policy.txt
 .. _All About Do Not Track: https://www.allaboutdnt.com
 
 Cookies
@@ -278,29 +275,23 @@ By using our website, you agree that we can place these types of cookies on your
 If you disable your browser or device's ability to accept cookies,
 you will not be able to log in to Read the Docs.
 
-Google Analytics
-~~~~~~~~~~~~~~~~
+Plausible
+~~~~~~~~~
 
-We use Google Analytics as a third party tracking service,
+We use Plausible as a third party analytics service,
 but we don't use it to track you individually or collect your User Personal Information.
-We use Google Analytics to collect information about how our website performs
+We use Plausible to collect information about how our website performs
 and how our users, in general, navigate through and use Read the Docs.
 This helps us evaluate our users' use of Read the Docs;
 compile statistical reports on activity; and improve our content and website performance.
 
-Google Analytics gathers certain simple, non-personally identifying information over time,
-such as your IP address, browser type, internet service provider, referring and exit pages,
+Plausible gathers certain simple, non-personally identifying information over time,
+such as browser type, internet service provider, referring and exit pages,
 time stamp, and similar data about your use of Read the Docs.
 We do not link this information to any of your personal information such as your user name.
 
 Read the Docs will not, nor will we allow any third party to,
-use the Google Analytics tool to track our users individually;
-collect any User Personal Information other than IP address;
-or correlate your IP address with your identity.
-Google provides further information about its own privacy practices and offers a
-`browser add-on to opt out of Google Analytics tracking <https://tools.google.com/dlpage/gaoptout>`_.
-You may also opt-out of analytics on Read the Docs by enabling
-:ref:`Do Not Track <privacy-policy:Do Not Track>`.
+use the Plausible tool to track our users individually or collect any User Personal Information.
 
 
 How Read the Docs secures your information
@@ -342,7 +333,7 @@ In particular:
 * We also provide our users a method of recourse and enforcement.
 
 
-Resolving Complaints
+Resolving complaints
 --------------------
 
 If you have concerns about the way Read the Docs is handling your User Personal Information,
@@ -371,7 +362,7 @@ How you can access and control the information we collect
 
 If you're already a Read the Docs user, you may access, update, alter,
 or delete your basic user profile information by
-`editing your user account <https://readthedocs.org/accounts/edit/>`__.
+`editing your user account <https://app.readthedocs.org/accounts/edit/>`__.
 
 
 Data retention and deletion
@@ -387,13 +378,13 @@ so unless you choose to delete your account,
 we will retain your account information indefinitely.
 
 If you would like to delete your User Personal Information,
-you may do so in your `user account <https://readthedocs.org/accounts/delete/>`__.
+you may do so in your `user account <https://app.readthedocs.org/accounts/delete/>`__.
 We will retain and use your information as necessary to comply with
 our legal obligations, resolve disputes, and enforce our agreements,
 but barring legal requirements, we will delete your full profile.
 
 Our web server logs for Read the Docs Community,
-Read the Docs for Business, and Documentation Sites
+Read the Docs Business, and Documentation Sites
 are deleted after 10 days barring legal obligations.
 
 

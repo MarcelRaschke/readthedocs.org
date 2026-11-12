@@ -1,0 +1,1043 @@
+import itertools
+from unittest import mock
+
+import pytest
+from django.contrib.auth.models import User
+from django.test import TestCase
+from django.test import override_settings
+from django.urls import reverse
+from django_dynamic_fixture import get
+
+from readthedocs.builds.models import Version
+from readthedocs.organizations.models import Organization
+from readthedocs.organizations.models import Team
+from readthedocs.projects.constants import PRIVATE
+from readthedocs.projects.constants import PUBLIC
+from readthedocs.projects.models import HTMLFile
+from readthedocs.projects.models import Project
+from readthedocs.search.api.v3.executor import SearchExecutor
+from readthedocs.search.documents import PageDocument
+from readthedocs.search.tests.utils import SearchIndexTestMixin
+
+
+@pytest.mark.search
+class SearchTestBase(SearchIndexTestMixin, TestCase):
+    def get_dummy_processed_json(self, extra=None):
+        """
+        Return a dict to be used as data indexed by ES.
+
+        :param extra: By default it returns some default values,
+                      you can override this passing a dict to extra.
+        """
+        extra = extra or {}
+        default = {
+            "path": "index.html",
+            "title": "Title",
+            "sections": [
+                {
+                    "id": "first",
+                    "title": "First Paragraph",
+                    "content": "First paragraph, content of interest: test.",
+                }
+            ],
+            "domain_data": [],
+        }
+        default.update(extra)
+        return default
+
+    def create_index(self, version, files=None):
+        """
+        Create a search index for `version` with files as content.
+
+        :param version: Version object
+        :param files: A dictionary with the filename as key and a dict as value
+                      to be passed to `get_dummy_processed_json`.
+        """
+        files = files or {"index.html": {}}
+        for file, extra in files.items():
+            html_file = HTMLFile.objects.filter(
+                project=version.project, version=version, name=file
+            ).first()
+            if not html_file:
+                html_file = get(
+                    HTMLFile,
+                    project=version.project,
+                    version=version,
+                    name=file,
+                )
+            html_file.get_processed_json = mock.MagicMock(
+                name="get_processed_json",
+                return_value=self.get_dummy_processed_json(extra),
+            )
+            PageDocument().update(html_file)
+
+
+@override_settings(ALLOW_PRIVATE_REPOS=False)
+@override_settings(RTD_ALLOW_ORGANIZATIONS=False)
+class SearchAPITest(SearchTestBase):
+    def setUp(self):
+        super().setUp()
+        self.user = get(User)
+        self.another_user = get(User)
+        self.project = get(
+            Project, slug="project", users=[self.user], privacy_level=PUBLIC
+        )
+        self.another_project = get(
+            Project,
+            slug="another-project",
+            users=[self.another_user],
+            privacy_level=PUBLIC,
+        )
+
+        self.project.versions.update(privacy_level=PUBLIC, active=True, built=True)
+        self.version = self.project.versions.first()
+
+        self.another_project.versions.update(
+            privacy_level=PUBLIC, active=True, built=True
+        )
+        self.another_version = self.another_project.versions.first()
+
+        self.url = reverse("search_api_v3")
+        self.client.force_login(self.user)
+
+        for version in Version.objects.all():
+            self.create_index(version)
+
+    def get(self, *args, **kwargs):
+        return self.client.get(*args, **kwargs)
+
+    def test_search_no_projects(self):
+        resp = self.get(self.url, data={"q": "test"})
+
+        self.assertEqual(resp.status_code, 200)
+        results = resp.data["results"]
+        projects = resp.data["projects"]
+        self.assertEqual(results, [])
+        self.assertEqual(projects, [])
+        self.assertEqual(resp.data["query"], "test")
+
+    def test_search_project(self):
+        resp = self.get(self.url, data={"q": "project:project test"})
+
+        self.assertEqual(resp.status_code, 200)
+        projects = resp.data["projects"]
+        results = resp.data["results"]
+        self.assertEqual(
+            projects, [{"slug": "project", "versions": [{"slug": "latest"}]}]
+        )
+        self.assertEqual(len(results), 1)
+        self.assertEqual(resp.data["query"], "test")
+
+    def test_search_project_explicit_version(self):
+        resp = self.get(self.url, data={"q": "project:project/latest test"})
+
+        self.assertEqual(resp.status_code, 200)
+        projects = resp.data["projects"]
+        results = resp.data["results"]
+        self.assertEqual(
+            projects, [{"slug": "project", "versions": [{"slug": "latest"}]}]
+        )
+        self.assertEqual(len(results), 1)
+        self.assertEqual(resp.data["query"], "test")
+
+        new_version = get(
+            Version,
+            project=self.project,
+            slug="v2",
+            privacy_level=PUBLIC,
+            built=True,
+            active=True,
+        )
+        self.create_index(new_version)
+        resp = self.get(self.url, data={"q": "project:project/v2 test"})
+
+        self.assertEqual(resp.status_code, 200)
+        projects = resp.data["projects"]
+        results = resp.data["results"]
+        self.assertEqual(projects, [{"slug": "project", "versions": [{"slug": "v2"}]}])
+        self.assertEqual(len(results), 1)
+        self.assertEqual(resp.data["query"], "test")
+
+    def test_search_project_explicit_version_unexisting(self):
+        resp = self.get(self.url, data={"q": "project:project/v3 test"})
+        self.assertEqual(resp.status_code, 200)
+        projects = resp.data["projects"]
+        results = resp.data["results"]
+        self.assertEqual(projects, [])
+        self.assertEqual(results, [])
+        self.assertEqual(resp.data["query"], "test")
+
+    def test_search_project_unexisting(self):
+        resp = self.get(self.url, data={"q": "project:foobar/latest test"})
+        self.assertEqual(resp.status_code, 200)
+        projects = resp.data["projects"]
+        results = resp.data["results"]
+        self.assertEqual(projects, [])
+        self.assertEqual(results, [])
+        self.assertEqual(resp.data["query"], "test")
+
+    def test_search_project_valid_and_invalid(self):
+        resp = self.get(
+            self.url, data={"q": "project:foobar/latest project:project/latest test"}
+        )
+        self.assertEqual(resp.status_code, 200)
+        projects = resp.data["projects"]
+        results = resp.data["results"]
+        self.assertEqual(
+            projects, [{"slug": "project", "versions": [{"slug": "latest"}]}]
+        )
+        self.assertEqual(len(results), 1)
+        self.assertEqual(resp.data["query"], "test")
+
+    def test_search_multiple_projects(self):
+        resp = self.get(
+            self.url, data={"q": "project:project project:another-project test"}
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        projects = resp.data["projects"]
+        results = resp.data["results"]
+        self.assertEqual(
+            projects,
+            [
+                {"slug": "project", "versions": [{"slug": "latest"}]},
+                {"slug": "another-project", "versions": [{"slug": "latest"}]},
+            ],
+        )
+        self.assertEqual(len(results), 2)
+        self.assertEqual(resp.data["query"], "test")
+
+    def test_cache_tags(self):
+        resp = self.get(self.url, data={"q": "project:project test"})
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(
+            resp["Cache-Tag"], "project,project:latest,project:rtd-search"
+        )
+
+    def test_cache_tags_multiple_projects(self):
+        resp = self.get(
+            self.url, data={"q": "project:project project:another-project test"}
+        )
+
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(
+            resp["Cache-Tag"],
+            "project,project:latest,project:rtd-search,"
+            "another-project,another-project:latest,another-project:rtd-search",
+        )
+
+    def test_search_user_me_anonymous_user(self):
+        self.client.logout()
+        resp = self.get(self.url, data={"q": "user:@me test"})
+        projects = resp.data["projects"]
+        results = resp.data["results"]
+        self.assertEqual(projects, [])
+        self.assertEqual(results, [])
+        self.assertEqual(resp.data["query"], "test")
+
+    def test_search_user_me_logged_in_user(self):
+        self.client.force_login(self.user)
+        resp = self.get(self.url, data={"q": "user:@me test"})
+        projects = resp.data["projects"]
+        results = resp.data["results"]
+        self.assertEqual(
+            projects, [{"slug": "project", "versions": [{"slug": "latest"}]}]
+        )
+        self.assertEqual(len(results), 1)
+        self.assertEqual(resp.data["query"], "test")
+
+        self.client.force_login(self.another_user)
+        resp = self.get(self.url, data={"q": "user:@me test"})
+        projects = resp.data["projects"]
+        results = resp.data["results"]
+        self.assertEqual(
+            projects, [{"slug": "another-project", "versions": [{"slug": "latest"}]}]
+        )
+        self.assertEqual(len(results), 1)
+        self.assertEqual(resp.data["query"], "test")
+
+    def test_search_user_invalid_value(self):
+        self.client.force_login(self.user)
+        resp = self.get(self.url, data={"q": "user:test test"})
+        projects = resp.data["projects"]
+        results = resp.data["results"]
+        self.assertEqual(projects, [])
+        self.assertEqual(results, [])
+        self.assertEqual(resp.data["query"], "test")
+
+    def test_search_user_and_project(self):
+        self.client.force_login(self.user)
+        resp = self.get(
+            self.url, data={"q": "user:@me project:another-project/latest test"}
+        )
+        projects = resp.data["projects"]
+        results = resp.data["results"]
+        self.assertEqual(
+            projects,
+            [
+                {"slug": "another-project", "versions": [{"slug": "latest"}]},
+                {"slug": "project", "versions": [{"slug": "latest"}]},
+            ],
+        )
+        self.assertEqual(len(results), 2)
+        self.assertEqual(resp.data["query"], "test")
+
+    def test_search_subprojects(self):
+        subproject = get(
+            Project, slug="subproject", users=[self.user], privacy_level=PUBLIC
+        )
+        self.project.add_subproject(subproject)
+        get(Version, slug="v2", project=self.project, active=True, built=True)
+        get(Version, slug="v3", project=self.project, active=True, built=True)
+        get(Version, slug="v2", project=subproject, active=True, built=True)
+        get(Version, slug="v4", project=subproject, active=True, built=True)
+        subproject.versions.update(built=True, active=True, privacy_level=PUBLIC)
+        self.project.versions.update(built=True, active=True, privacy_level=PUBLIC)
+
+        for version in itertools.chain(
+            subproject.versions.all(), self.project.versions.all()
+        ):
+            self.create_index(version)
+
+        # Search default version of the project and its subprojects.
+        resp = self.get(self.url, data={"q": "subprojects:project test"})
+        projects = resp.data["projects"]
+        results = resp.data["results"]
+        self.assertEqual(
+            projects,
+            [
+                {"slug": "project", "versions": [{"slug": "latest"}]},
+                {"slug": "subproject", "versions": [{"slug": "latest"}]},
+            ],
+        )
+        self.assertEqual(len(results), 2)
+        self.assertEqual(resp.data["query"], "test")
+
+        # Explicitly search on the latest version.
+        resp = self.get(self.url, data={"q": "subprojects:project/latest test"})
+        projects = resp.data["projects"]
+        results = resp.data["results"]
+        self.assertEqual(
+            projects,
+            [
+                {"slug": "project", "versions": [{"slug": "latest"}]},
+                {"slug": "subproject", "versions": [{"slug": "latest"}]},
+            ],
+        )
+        self.assertEqual(len(results), 2)
+        self.assertEqual(resp.data["query"], "test")
+
+        # Explicitly search on the v2 version.
+        resp = self.get(self.url, data={"q": "subprojects:project/v2 test"})
+        projects = resp.data["projects"]
+        results = resp.data["results"]
+        self.assertEqual(
+            projects,
+            [
+                {"slug": "project", "versions": [{"slug": "v2"}]},
+                {"slug": "subproject", "versions": [{"slug": "v2"}]},
+            ],
+        )
+        self.assertEqual(len(results), 2)
+        self.assertEqual(resp.data["query"], "test")
+
+        # Explicitly search on the v3 version.
+        # Only the main project has this version,
+        # we will default to the default version of its subproject.
+        resp = self.get(self.url, data={"q": "subprojects:project/v3 test"})
+        projects = resp.data["projects"]
+        results = resp.data["results"]
+        self.assertEqual(
+            projects,
+            [
+                {"slug": "project", "versions": [{"slug": "v3"}]},
+                {"slug": "subproject", "versions": [{"slug": "latest"}]},
+            ],
+        )
+        self.assertEqual(len(results), 2)
+        self.assertEqual(resp.data["query"], "test")
+
+        # Explicitly search on the v4 version.
+        # The main project doesn't have this version,
+        # we include results from its subprojects only.
+        resp = self.get(self.url, data={"q": "subprojects:project/v4 test"})
+        projects = resp.data["projects"]
+        results = resp.data["results"]
+        self.assertEqual(
+            projects, [{"slug": "subproject", "versions": [{"slug": "v4"}]}]
+        )
+        self.assertEqual(len(results), 1)
+        self.assertEqual(resp.data["query"], "test")
+
+    def test_search_pagination_max_result_window(self):
+        """Test that pagination respects the max_result_window limit."""
+        # Test that requesting a page that would exceed max_result_window (1000) fails
+        # With page_size=15 (default), page 67 would end at 1005 (67*15),
+        # which exceeds the max_result_window of 1000.
+        # Page 67 is the first page that exceeds the limit with default page_size.
+        resp = self.get(self.url, data={"q": "project:project test", "page": 67})
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("Page number is too high", str(resp.data))
+
+        # Test that page 66 is allowed (ends at 990, which is <= 1000)
+        resp = self.get(self.url, data={"q": "project:project test", "page": 66})
+        self.assertEqual(resp.status_code, 200)
+
+        # Test with custom page_size
+        # With page_size=30, page 167 would end at 5010 (167*30),
+        # which exceeds the max_result_window of 1000
+        resp = self.get(
+            self.url, data={"q": "project:project test", "page": 167, "page_size": 30}
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("Page number is too high", str(resp.data))
+
+        # Test that page 33 is allowed with page_size=30 (ends at 990, which is <= 1000)
+        resp = self.get(
+            self.url, data={"q": "project:project test", "page": 33, "page_size": 30}
+        )
+        self.assertEqual(resp.status_code, 200)
+
+        # Test edge case: exactly at the limit
+        # page_size=10, page 100 would end exactly at 1000 (100*10),
+        # which should be allowed (not greater than 1000)
+        resp = self.get(
+            self.url, data={"q": "project:project test", "page": 100, "page_size": 10}
+        )
+        self.assertEqual(resp.status_code, 200)
+
+        # page 101 with page_size=10 would exceed the limit (101*10 = 1010, which is > 1000)
+        resp = self.get(
+            self.url, data={"q": "project:project test", "page": 101, "page_size": 10}
+        )
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("Page number is too high", str(resp.data))
+
+    def test_search_pagination_invalid_page(self):
+        """Test that invalid page numbers are rejected."""
+        # Test negative page number
+        resp = self.get(self.url, data={"q": "project:project test", "page": -1})
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("Invalid page", str(resp.data))
+
+        # Test zero page number
+        resp = self.get(self.url, data={"q": "project:project test", "page": 0})
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("Invalid page", str(resp.data))
+
+        # Test non-numeric page number
+        resp = self.get(self.url, data={"q": "project:project test", "page": "invalid"})
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("Invalid page", str(resp.data))
+
+        # Test float page number
+        # The pagination code converts floats to int, but non-integer floats
+        # should be rejected as invalid
+        resp = self.get(self.url, data={"q": "project:project test", "page": 1.5})
+        self.assertEqual(resp.status_code, 400)
+        self.assertIn("Invalid page", str(resp.data))
+
+
+@pytest.mark.proxito
+@override_settings(PUBLIC_DOMAIN="readthedocs.io")
+class ProxiedSearchAPITest(SearchAPITest):
+    host = "project.readthedocs.io"
+
+    def get(self, *args, **kwargs):
+        return self.client.get(*args, HTTP_HOST=self.host, **kwargs)
+
+    def test_search_project_number_of_queries(self):
+        # Default version
+        with self.assertNumQueries(10):
+            resp = self.get(self.url, data={"q": "project:project test"})
+            assert resp.status_code == 200
+            assert resp.data["results"]
+
+        with self.assertNumQueries(16):
+            resp = self.get(
+                self.url, data={"q": "project:project project:another-project test"}
+            )
+            assert resp.status_code == 200
+            assert resp.data["results"]
+
+        # With explicit version
+        with self.assertNumQueries(9):
+            resp = self.get(self.url, data={"q": "project:project/latest test"})
+            assert resp.status_code == 200
+            assert resp.data["results"]
+
+        with self.assertNumQueries(15):
+            resp = self.get(
+                self.url, data={"q": "project:project/latest project:another-project/latest test"}
+            )
+            assert resp.status_code == 200
+            assert resp.data["results"]
+
+    @mock.patch("readthedocs.search.api.v3.views.tasks.record_search_query_batch.delay", new=mock.MagicMock())
+    def test_search_project_number_of_queries_without_search_recording(self):
+        # Default version
+        with self.assertNumQueries(7):
+            resp = self.get(self.url, data={"q": "project:project test"})
+            assert resp.status_code == 200
+            assert resp.data["results"]
+
+        with self.assertNumQueries(11):
+            resp = self.get(
+                self.url, data={"q": "project:project project:another-project test"}
+            )
+            assert resp.status_code == 200
+            assert resp.data["results"]
+
+        # With explicit version
+        with self.assertNumQueries(7):
+            resp = self.get(self.url, data={"q": "project:project/latest test"})
+            assert resp.status_code == 200
+            assert resp.data["results"]
+
+        with self.assertNumQueries(11):
+            resp = self.get(
+                self.url, data={"q": "project:project/latest project:another-project/latest test"}
+            )
+            assert resp.status_code == 200
+            assert resp.data["results"]
+
+    @mock.patch("readthedocs.subscriptions.signals.get_stripe_client", new=mock.MagicMock())
+    def test_search_subprojects_number_of_queries(self):
+        subproject = get(
+            Project,
+            slug="subproject",
+            users=[self.user],
+            privacy_level=PUBLIC,
+        )
+        subproject.versions.update(built=True, active=True, privacy_level=PUBLIC)
+        self.create_index(subproject.versions.first())
+        self.project.add_subproject(subproject)
+
+        # Search on default version.
+        with self.assertNumQueries(15):
+            resp = self.get(self.url, data={"q": "subprojects:project test"})
+            assert resp.status_code == 200
+            assert resp.data["results"]
+
+        # Search on explicit version.
+        with self.assertNumQueries(13):
+            resp = self.get(self.url, data={"q": "subprojects:project/latest test"})
+            assert resp.status_code == 200
+            assert resp.data["results"]
+
+        # Add subprojects.
+        for i in range(3):
+            subproject = get(
+                Project,
+                slug=f"subproject-{i}",
+                users=[self.user],
+                privacy_level=PUBLIC,
+            )
+            subproject.versions.update(built=True, active=True, privacy_level=PUBLIC)
+            self.create_index(subproject.versions.first())
+            self.project.add_subproject(subproject)
+
+        # Search on default version.
+        with self.assertNumQueries(25):
+            resp = self.get(self.url, data={"q": "subprojects:project test"})
+            assert resp.status_code == 200
+            assert resp.data["results"]
+
+        # Search on explicit version.
+        with self.assertNumQueries(22):
+            resp = self.get(self.url, data={"q": "subprojects:project/latest test"})
+            assert resp.status_code == 200
+            assert resp.data["results"]
+
+    @mock.patch("readthedocs.search.api.v3.views.tasks.record_search_query_batch.delay", new=mock.MagicMock())
+    def test_search_subprojects_number_of_queries_without_search_recording(self):
+        subproject = get(
+            Project,
+            slug="subproject",
+            users=[self.user],
+            privacy_level=PUBLIC,
+        )
+        subproject.versions.update(built=True, active=True, privacy_level=PUBLIC)
+        self.create_index(subproject.versions.first())
+        self.project.add_subproject(subproject)
+
+        # Search on default version.
+        with self.assertNumQueries(9):
+            resp = self.get(self.url, data={"q": "subprojects:project test"})
+            assert resp.status_code == 200
+            assert resp.data["results"]
+
+        # Search on explicit version.
+        with self.assertNumQueries(9):
+            resp = self.get(self.url, data={"q": "subprojects:project/latest test"})
+            assert resp.status_code == 200
+            assert resp.data["results"]
+
+        # Add subprojects.
+        for i in range(3):
+            subproject = get(
+                Project,
+                slug=f"subproject-{i}",
+                users=[self.user],
+                privacy_level=PUBLIC,
+            )
+            subproject.versions.update(built=True, active=True, privacy_level=PUBLIC)
+            self.create_index(subproject.versions.first())
+            self.project.add_subproject(subproject)
+
+        # Search on default version.
+        with self.assertNumQueries(12):
+            resp = self.get(self.url, data={"q": "subprojects:project test"})
+            assert resp.status_code == 200
+            assert resp.data["results"]
+
+        # Search on explicit version.
+        with self.assertNumQueries(12):
+            resp = self.get(self.url, data={"q": "subprojects:project/latest test"})
+            assert resp.status_code == 200
+            assert resp.data["results"]
+
+
+@override_settings(ALLOW_PRIVATE_REPOS=False)
+@override_settings(RTD_ALLOW_ORGANIZATIONS=False)
+@mock.patch.object(SearchExecutor, "search", new=mock.MagicMock(return_value=None))
+class SearchAPICacheTagsTest(TestCase):
+    """
+    Test the Cache-Tag header of the search API.
+
+    The search itself is mocked, so these tests don't need Elasticsearch.
+    """
+
+    def setUp(self):
+        self.user = get(User)
+        self.project = get(Project, slug="project", users=[self.user], privacy_level=PUBLIC)
+        self.project.versions.update(privacy_level=PUBLIC, active=True, built=True)
+        self.url = reverse("search_api_v3")
+        self.client.force_login(self.user)
+
+    def add_subprojects(self, count):
+        subprojects = []
+        for i in range(count):
+            subproject = get(
+                Project,
+                slug=f"subproject-{i:03}",
+                users=[self.user],
+                privacy_level=PUBLIC,
+            )
+            subproject.versions.update(privacy_level=PUBLIC, active=True, built=True)
+            self.project.add_subproject(subproject)
+            subprojects.append(subproject)
+        return subprojects
+
+    def get_cache_tags_by_project(self, cache_tag):
+        tags = cache_tag.split(",")
+        # All tags of a project are added together.
+        assert len(tags) % 3 == 0
+        tags_by_project = {}
+        for i in range(0, len(tags), 3):
+            slug = tags[i]
+            assert tags[i : i + 3] == [slug, f"{slug}:latest", f"{slug}:rtd-search"]
+            tags_by_project[slug] = tags[i : i + 3]
+        return tags_by_project
+
+    def test_cache_tags_subprojects(self):
+        subprojects = self.add_subprojects(3)
+
+        resp = self.client.get(self.url, data={"q": "subprojects:project test"})
+
+        assert resp.status_code == 200
+        tags_by_project = self.get_cache_tags_by_project(resp["Cache-Tag"])
+        assert list(tags_by_project)[0] == "project"
+        assert set(tags_by_project) == {"project"} | {
+            subproject.slug for subproject in subprojects
+        }
+
+    def test_cache_tags_limit(self):
+        subprojects = self.add_subprojects(50)
+
+        resp = self.client.get(self.url, data={"q": "subprojects:project test"})
+
+        assert resp.status_code == 200
+        cache_tag = resp["Cache-Tag"]
+        assert len(cache_tag) <= 2_000
+        tags_by_project = self.get_cache_tags_by_project(cache_tag)
+        assert list(tags_by_project)[0] == "project"
+        # Only some of the subprojects fit in the header.
+        included = set(tags_by_project) - {"project"}
+        assert 0 < len(included) < len(subprojects)
+        assert included < {subproject.slug for subproject in subprojects}
+        # Adding the tags of another project would exceed the limit.
+        excluded = next(
+            subproject.slug for subproject in subprojects if subproject.slug not in included
+        )
+        next_project_tags = f"{excluded},{excluded}:latest,{excluded}:rtd-search"
+        assert len(cache_tag) + 1 + len(next_project_tags) > 2_000
+
+
+@override_settings(ALLOW_PRIVATE_REPOS=True)
+@override_settings(RTD_ALLOW_ORGANIZATIONS=True)
+class SearchAPIWithOrganizationsTest(SearchTestBase):
+    def setUp(self):
+        super().setUp()
+
+        self.user = get(User)
+        self.member = get(User)
+        self.project = get(Project, slug="project")
+        self.project.versions.update(built=True, active=True, privacy_level=PRIVATE)
+        self.version = self.project.versions.first()
+        self.version_public = get(
+            Version,
+            slug="public",
+            project=self.project,
+            privacy_level=PUBLIC,
+            active=True,
+            built=True,
+        )
+
+        self.project_b = get(Project, slug="project-b")
+        self.project_b.versions.update(built=True, active=True, privacy_level=PRIVATE)
+        self.version_b = self.project_b.versions.first()
+        self.version_b_public = get(
+            Version,
+            slug="public",
+            project=self.project_b,
+            privacy_level=PUBLIC,
+            built=True,
+            active=True,
+        )
+
+        self.organization = get(
+            Organization, owners=[self.user], projects=[self.project, self.project_b]
+        )
+
+        self.team = get(
+            Team,
+            members=[self.member],
+            organization=self.organization,
+            projects=[self.project_b],
+            access="readonly",
+        )
+
+        self.another_user = get(User)
+        self.another_project = get(Project, slug="another-project")
+        self.another_project.versions.update(
+            built=True, active=True, privacy_level=PRIVATE
+        )
+        self.another_version = self.another_project.versions.first()
+        self.another_version_public = get(
+            Version,
+            slug="public",
+            project=self.another_project,
+            privacy_level=PUBLIC,
+            built=True,
+            active=True,
+        )
+
+        self.another_organization = get(
+            Organization, owners=[self.another_user], projects=[self.another_project]
+        )
+
+        self.url = reverse("search_api_v3")
+        self.client.force_login(self.user)
+
+        for version in Version.objects.all():
+            self.create_index(version)
+
+    def test_search_no_projects(self):
+        resp = self.client.get(self.url, data={"q": "test"})
+
+        self.assertEqual(resp.status_code, 200)
+        results = resp.data["results"]
+        projects = resp.data["projects"]
+        self.assertEqual(results, [])
+        self.assertEqual(projects, [])
+        self.assertEqual(resp.data["query"], "test")
+
+    def test_search_project(self):
+        resp = self.client.get(self.url, data={"q": "project:project test"})
+
+        self.assertEqual(resp.status_code, 200)
+        results = resp.data["results"]
+        projects = resp.data["projects"]
+        self.assertEqual(len(results), 1)
+        self.assertEqual(
+            projects, [{"slug": "project", "versions": [{"slug": "latest"}]}]
+        )
+        self.assertEqual(resp.data["query"], "test")
+
+    def test_search_project_explicit_version(self):
+        resp = self.client.get(self.url, data={"q": "project:project/public test"})
+
+        self.assertEqual(resp.status_code, 200)
+        results = resp.data["results"]
+        projects = resp.data["projects"]
+        self.assertEqual(len(results), 1)
+        self.assertEqual(
+            projects, [{"slug": "project", "versions": [{"slug": "public"}]}]
+        )
+        self.assertEqual(resp.data["query"], "test")
+
+    def test_search_project_no_permissions(self):
+        resp = self.client.get(self.url, data={"q": "project:another-project test"})
+
+        self.assertEqual(resp.status_code, 200)
+        results = resp.data["results"]
+        projects = resp.data["projects"]
+        self.assertEqual(results, [])
+        self.assertEqual(projects, [])
+        self.assertEqual(resp.data["query"], "test")
+
+    def test_search_project_private_version_anonymous_user(self):
+        self.client.logout()
+
+        resp = self.client.get(self.url, data={"q": "project:project test"})
+
+        self.assertEqual(resp.status_code, 200)
+        results = resp.data["results"]
+        projects = resp.data["projects"]
+        self.assertEqual(results, [])
+        self.assertEqual(projects, [])
+        self.assertEqual(resp.data["query"], "test")
+
+    def test_search_project_public_version_anonymous_user(self):
+        self.client.logout()
+
+        resp = self.client.get(self.url, data={"q": "project:project/public test"})
+
+        self.assertEqual(resp.status_code, 200)
+        results = resp.data["results"]
+        projects = resp.data["projects"]
+        self.assertEqual(len(results), 1)
+        self.assertEqual(
+            projects, [{"slug": "project", "versions": [{"slug": "public"}]}]
+        )
+        self.assertEqual(resp.data["query"], "test")
+
+    def test_search_multiple_projects(self):
+        resp = self.client.get(
+            self.url,
+            data={
+                "q": "project:project project:another-project/latest project:project-b/latest test"
+            },
+        )
+        self.assertEqual(resp.status_code, 200)
+        results = resp.data["results"]
+        projects = resp.data["projects"]
+        self.assertEqual(len(results), 2)
+        self.assertEqual(
+            projects,
+            [
+                {"slug": "project", "versions": [{"slug": "latest"}]},
+                {"slug": "project-b", "versions": [{"slug": "latest"}]},
+            ],
+        )
+        self.assertEqual(resp.data["query"], "test")
+
+    def test_search_multiple_projects_team_member(self):
+        self.client.force_login(self.member)
+
+        resp = self.client.get(
+            self.url,
+            data={
+                "q": "project:project project:another-project/latest project:project-b/latest test"
+            },
+        )
+        self.assertEqual(resp.status_code, 200)
+        results = resp.data["results"]
+        projects = resp.data["projects"]
+        self.assertEqual(len(results), 1)
+        self.assertEqual(
+            projects, [{"slug": "project-b", "versions": [{"slug": "latest"}]}]
+        )
+        self.assertEqual(resp.data["query"], "test")
+
+    def test_search_user_me_anonymous_user(self):
+        self.client.logout()
+        resp = self.client.get(self.url, data={"q": "user:@me test"})
+        projects = resp.data["projects"]
+        results = resp.data["results"]
+        self.assertEqual(projects, [])
+        self.assertEqual(results, [])
+        self.assertEqual(resp.data["query"], "test")
+
+    def test_search_user_me_logged_in_user(self):
+        self.client.force_login(self.user)
+        resp = self.client.get(self.url, data={"q": "user:@me test"})
+        projects = resp.data["projects"]
+        results = resp.data["results"]
+        self.assertEqual(
+            projects,
+            [
+                {"slug": "project", "versions": [{"slug": "latest"}]},
+                {"slug": "project-b", "versions": [{"slug": "latest"}]},
+            ],
+        )
+        self.assertEqual(len(results), 2)
+        self.assertEqual(resp.data["query"], "test")
+
+        self.client.force_login(self.member)
+        resp = self.client.get(self.url, data={"q": "user:@me test"})
+        projects = resp.data["projects"]
+        results = resp.data["results"]
+        self.assertEqual(
+            projects, [{"slug": "project-b", "versions": [{"slug": "latest"}]}]
+        )
+        self.assertEqual(len(results), 1)
+        self.assertEqual(resp.data["query"], "test")
+
+        self.client.force_login(self.another_user)
+        resp = self.client.get(self.url, data={"q": "user:@me test"})
+        projects = resp.data["projects"]
+        results = resp.data["results"]
+        self.assertEqual(
+            projects, [{"slug": "another-project", "versions": [{"slug": "latest"}]}]
+        )
+        self.assertEqual(len(results), 1)
+        self.assertEqual(resp.data["query"], "test")
+
+    def test_search_user_and_project(self):
+        self.client.force_login(self.member)
+        resp = self.client.get(
+            self.url, data={"q": "user:@me project:another-project/public test"}
+        )
+        projects = resp.data["projects"]
+        results = resp.data["results"]
+        self.assertEqual(
+            projects,
+            [
+                {"slug": "another-project", "versions": [{"slug": "public"}]},
+                {"slug": "project-b", "versions": [{"slug": "latest"}]},
+            ],
+        )
+        self.assertEqual(len(results), 2)
+        self.assertEqual(resp.data["query"], "test")
+
+    def test_search_subprojects(self):
+        self.project.add_subproject(self.project_b)
+
+        # Search default version of the project and its subprojects.
+        resp = self.client.get(self.url, data={"q": "subprojects:project test"})
+        projects = resp.data["projects"]
+        results = resp.data["results"]
+        self.assertEqual(
+            projects,
+            [
+                {"slug": "project", "versions": [{"slug": "latest"}]},
+                {"slug": "project-b", "versions": [{"slug": "latest"}]},
+            ],
+        )
+        self.assertEqual(len(results), 2)
+        self.assertEqual(resp.data["query"], "test")
+
+        # Explicitly search on the latest version.
+        resp = self.client.get(self.url, data={"q": "subprojects:project/latest test"})
+        projects = resp.data["projects"]
+        results = resp.data["results"]
+        self.assertEqual(
+            projects,
+            [
+                {"slug": "project", "versions": [{"slug": "latest"}]},
+                {"slug": "project-b", "versions": [{"slug": "latest"}]},
+            ],
+        )
+        self.assertEqual(len(results), 2)
+        self.assertEqual(resp.data["query"], "test")
+
+        # Explicitly search on the public version.
+        resp = self.client.get(self.url, data={"q": "subprojects:project/public test"})
+        projects = resp.data["projects"]
+        results = resp.data["results"]
+        self.assertEqual(
+            projects,
+            [
+                {"slug": "project", "versions": [{"slug": "public"}]},
+                {"slug": "project-b", "versions": [{"slug": "public"}]},
+            ],
+        )
+        self.assertEqual(len(results), 2)
+        self.assertEqual(resp.data["query"], "test")
+
+    def test_search_subprojects_with_team_member(self):
+        self.client.force_login(self.member)
+        self.project.add_subproject(self.project_b)
+
+        # Search default version of the project and its subprojects.
+        resp = self.client.get(self.url, data={"q": "subprojects:project test"})
+        projects = resp.data["projects"]
+        results = resp.data["results"]
+        self.assertEqual(
+            projects,
+            [
+                {"slug": "project-b", "versions": [{"slug": "latest"}]},
+            ],
+        )
+        self.assertEqual(len(results), 1)
+        self.assertEqual(resp.data["query"], "test")
+
+        # Explicitly search on the latest version.
+        resp = self.client.get(self.url, data={"q": "subprojects:project/latest test"})
+        projects = resp.data["projects"]
+        results = resp.data["results"]
+        self.assertEqual(
+            projects,
+            [
+                {"slug": "project-b", "versions": [{"slug": "latest"}]},
+            ],
+        )
+        self.assertEqual(len(results), 1)
+        self.assertEqual(resp.data["query"], "test")
+
+        # Explicitly search on the public version.
+        resp = self.client.get(self.url, data={"q": "subprojects:project/public test"})
+        projects = resp.data["projects"]
+        results = resp.data["results"]
+        self.assertEqual(
+            projects,
+            [
+                {"slug": "project", "versions": [{"slug": "public"}]},
+                {"slug": "project-b", "versions": [{"slug": "public"}]},
+            ],
+        )
+        self.assertEqual(len(results), 2)
+        self.assertEqual(resp.data["query"], "test")
+
+    def test_search_subprojects_with_anonymous_user(self):
+        self.client.logout()
+        self.project.add_subproject(self.project_b)
+
+        # Search default version of the project and its subprojects.
+        resp = self.client.get(self.url, data={"q": "subprojects:project test"})
+        projects = resp.data["projects"]
+        results = resp.data["results"]
+        self.assertEqual(
+            projects,
+            [],
+        )
+        self.assertEqual(len(results), 0)
+        self.assertEqual(resp.data["query"], "test")
+
+        # Explicitly search on the latest version.
+        resp = self.client.get(self.url, data={"q": "subprojects:project/latest test"})
+        projects = resp.data["projects"]
+        results = resp.data["results"]
+        self.assertEqual(
+            projects,
+            [],
+        )
+        self.assertEqual(len(results), 0)
+        self.assertEqual(resp.data["query"], "test")
+
+        # Explicitly search on the public version.
+        resp = self.client.get(self.url, data={"q": "subprojects:project/public test"})
+        projects = resp.data["projects"]
+        results = resp.data["results"]
+        self.assertEqual(
+            projects,
+            [
+                {"slug": "project", "versions": [{"slug": "public"}]},
+                {"slug": "project-b", "versions": [{"slug": "public"}]},
+            ],
+        )
+        self.assertEqual(len(results), 2)
+        self.assertEqual(resp.data["query"], "test")

@@ -4,7 +4,6 @@ import django_dynamic_fixture as fixture
 import pytest
 
 from readthedocs.builds.constants import (
-    BUILD_FINAL_STATES,
     BUILD_STATE_BUILDING,
     BUILD_STATE_CANCELLED,
     BUILD_STATE_CLONING,
@@ -15,7 +14,7 @@ from readthedocs.builds.constants import (
 )
 from readthedocs.builds.models import Build, Version
 from readthedocs.core.utils import trigger_build
-from readthedocs.projects.models import Feature, Project
+from readthedocs.projects.models import Project
 
 
 @pytest.mark.django_db
@@ -24,8 +23,6 @@ class TestCancelOldBuilds:
     def setup(self):
         self.project = fixture.get(Project)
         self.version = fixture.get(Version, project=self.project)
-        self.feature = fixture.get(Feature, feature_id=Feature.CANCEL_OLD_BUILDS)
-        self.feature.projects.add(self.project)
 
     @pytest.mark.parametrize(
         "state",
@@ -93,3 +90,25 @@ class TestCancelOldBuilds:
         assert builds_count_before == builds_count_after - 1
         assert update_docs_task.signature.called
         assert update_docs_task.signature().apply_async.called
+
+    @mock.patch("readthedocs.core.utils.cancel_build")
+    @mock.patch("readthedocs.projects.tasks.builds.update_docs_task")
+    def test_update_latest_build_on_trigger(self, update_docs_task, cancel_build):
+        assert self.project.builds.count() == 0
+        assert self.project.latest_build is None
+        _, build = trigger_build(
+            project=self.project,
+            version=self.version,
+        )
+
+        self.project.refresh_from_db()
+        assert self.project.builds.count() == 1
+        assert self.project.latest_build == build
+
+        _, build = trigger_build(
+            project=self.project,
+            version=self.version,
+        )
+        self.project.refresh_from_db()
+        assert self.project.builds.count() == 2
+        assert self.project.latest_build == build

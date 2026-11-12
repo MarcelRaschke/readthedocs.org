@@ -6,16 +6,18 @@ Serializers for the ES's search result object.
    They should be renamed in the ES index too.
 """
 
-import itertools
 import re
 from functools import namedtuple
-from operator import attrgetter
 from urllib.parse import urlparse
 
 from rest_framework import serializers
 
-from readthedocs.projects.constants import GENERIC, MKDOCS, SPHINX_HTMLDIR
-from readthedocs.projects.models import Project
+from readthedocs.builds.models import Version
+from readthedocs.core.resolver import Resolver
+from readthedocs.projects.constants import GENERIC
+from readthedocs.projects.constants import MKDOCS
+from readthedocs.projects.constants import SPHINX_HTMLDIR
+
 
 # Structures used for storing cached data of a version mostly.
 ProjectData = namedtuple("ProjectData", ["version", "alias"])
@@ -23,7 +25,6 @@ VersionData = namedtuple("VersionData", ["slug", "docs_url"])
 
 
 class ProjectHighlightSerializer(serializers.Serializer):
-
     name = serializers.SerializerMethodField()
     slug = serializers.SerializerMethodField()
     description = serializers.SerializerMethodField()
@@ -39,7 +40,6 @@ class ProjectHighlightSerializer(serializers.Serializer):
 
 
 class ProjectSearchSerializer(serializers.Serializer):
-
     type = serializers.CharField(default="project", source=None, read_only=True)
     name = serializers.CharField()
     slug = serializers.CharField()
@@ -49,15 +49,32 @@ class ProjectSearchSerializer(serializers.Serializer):
 
 
 class PageHighlightSerializer(serializers.Serializer):
-
     title = serializers.SerializerMethodField()
 
     def get_title(self, obj):
         return list(getattr(obj, "title", []))
 
 
-class PageSearchSerializer(serializers.Serializer):
+class SectionHighlightSerializer(serializers.Serializer):
+    title = serializers.SerializerMethodField()
+    content = serializers.SerializerMethodField()
 
+    def get_title(self, obj):
+        return list(getattr(obj, "sections.title", []))
+
+    def get_content(self, obj):
+        return list(getattr(obj, "sections.content", []))
+
+
+class SectionSearchSerializer(serializers.Serializer):
+    type = serializers.CharField(default="section", source=None, read_only=True)
+    id = serializers.CharField()
+    title = serializers.CharField()
+    content = serializers.CharField()
+    highlights = SectionHighlightSerializer(source="meta.highlight", default=dict)
+
+
+class PageSearchSerializer(serializers.Serializer):
     """
     Page serializer.
 
@@ -76,23 +93,29 @@ class PageSearchSerializer(serializers.Serializer):
     path = serializers.SerializerMethodField()
     domain = serializers.SerializerMethodField()
     highlights = PageHighlightSerializer(source="meta.highlight", default=dict)
-    blocks = serializers.SerializerMethodField()
+    blocks = SectionSearchSerializer(source="meta.inner_hits.sections", many=True, default=list)
 
     def __init__(self, *args, projects=None, **kwargs):
         if projects:
             context = kwargs.setdefault("context", {})
+            # NOTE: re-using the resolver for different projects usually doesn't save queries,
+            # but when projects belong to the same organization, it does.
+            resolver = Resolver()
+            context["resolver"] = resolver
             context["projects_data"] = {
-                project.slug: self._build_project_data(project, version.slug)
+                project.slug: self._build_project_data(project, version=version, resolver=resolver)
                 for project, version in projects
             }
         super().__init__(*args, **kwargs)
 
-    def _build_project_data(self, project, version_slug):
+    def _build_project_data(self, project, version, resolver: Resolver):
         """Build a `ProjectData` object given a project and its version."""
-        url = project.get_docs_url(version_slug=version_slug)
-        project_alias = project.superprojects.values_list("alias", flat=True).first()
+        url = resolver.resolve_version(project, version)
+        project_alias = None
+        if project.parent_relationship:
+            project_alias = project.parent_relationship.alias
         version_data = VersionData(
-            slug=version_slug,
+            slug=version.slug,
             docs_url=url,
         )
         return ProjectData(
@@ -113,10 +136,18 @@ class PageSearchSerializer(serializers.Serializer):
         if project_data:
             return project_data
 
-        project = Project.objects.filter(slug=obj.project).first()
-        if project:
+        resolver = self.context.get("resolver", Resolver())
+        version = (
+            Version.objects.filter(project__slug=obj.project, slug=obj.version)
+            .select_related("project")
+            .first()
+        )
+        if version:
+            project = version.project
             projects_data = self.context.setdefault("projects_data", {})
-            projects_data[obj.project] = self._build_project_data(project, obj.version)
+            projects_data[obj.project] = self._build_project_data(
+                project, version=version, resolver=resolver
+            )
             return projects_data[obj.project]
         return None
 
@@ -154,71 +185,3 @@ class PageSearchSerializer(serializers.Serializer):
 
             return docs_url.rstrip("/") + "/" + path.lstrip("/")
         return None
-
-    def get_blocks(self, obj):
-        """Combine and sort inner results (domains and sections)."""
-        serializers = {
-            "domain": DomainSearchSerializer,
-            "section": SectionSearchSerializer,
-        }
-
-        inner_hits = obj.meta.inner_hits
-        sections = inner_hits.sections or []
-        domains = inner_hits.domains or []
-
-        # Make them identifiable before merging them
-        for s in sections:
-            s.type = "section"
-        for d in domains:
-            d.type = "domain"
-
-        sorted_results = sorted(
-            itertools.chain(sections, domains),
-            key=attrgetter("meta.score"),
-            reverse=True,
-        )
-        sorted_results = [serializers[hit.type](hit).data for hit in sorted_results]
-        return sorted_results
-
-
-class DomainHighlightSerializer(serializers.Serializer):
-
-    name = serializers.SerializerMethodField()
-    content = serializers.SerializerMethodField()
-
-    def get_name(self, obj):
-        return list(getattr(obj, "domains.name", []))
-
-    def get_content(self, obj):
-        return list(getattr(obj, "domains.docstrings", []))
-
-
-class DomainSearchSerializer(serializers.Serializer):
-
-    type = serializers.CharField(default="domain", source=None, read_only=True)
-    role = serializers.CharField(source="role_name")
-    name = serializers.CharField()
-    id = serializers.CharField(source="anchor")
-    content = serializers.CharField(source="docstrings")
-    highlights = DomainHighlightSerializer(source="meta.highlight", default=dict)
-
-
-class SectionHighlightSerializer(serializers.Serializer):
-
-    title = serializers.SerializerMethodField()
-    content = serializers.SerializerMethodField()
-
-    def get_title(self, obj):
-        return list(getattr(obj, "sections.title", []))
-
-    def get_content(self, obj):
-        return list(getattr(obj, "sections.content", []))
-
-
-class SectionSearchSerializer(serializers.Serializer):
-
-    type = serializers.CharField(default="section", source=None, read_only=True)
-    id = serializers.CharField()
-    title = serializers.CharField()
-    content = serializers.CharField()
-    highlights = SectionHighlightSerializer(source="meta.highlight", default=dict)

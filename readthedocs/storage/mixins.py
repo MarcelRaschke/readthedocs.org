@@ -1,10 +1,121 @@
 """Django storage mixin classes for different storage backends (Azure, S3)."""
 
-from urllib.parse import urlsplit, urlunsplit
+import subprocess
+from functools import cached_property
+from pathlib import Path
+from typing import Iterator
+from urllib.parse import urlsplit
+from urllib.parse import urlunsplit
+
+import structlog
+from django.conf import settings
+from django.core.exceptions import SuspiciousFileOperation
+
+from readthedocs.storage.rclone import RCLONE_EXIT_DIR_NOT_FOUND
+
+
+log = structlog.get_logger(__name__)
+
+
+class RTDBaseStorage:
+    """
+    A common interface for all our storage backends to implement.
+
+    This adds some convenience methods to Django's File Storage API.
+    like to copy and delete entire directories efficiently,
+    and interacting with rclone to sync directories to storage.
+
+    See: https://docs.djangoproject.com/en/5.2/ref/files/storage/
+    """
+
+    def _check_suspicious_path(self, path):
+        """Check that the given path isn't a symlink or outside the doc root."""
+        path = Path(path)
+        resolved_path = path.resolve()
+        if path.is_symlink():
+            msg = "Suspicious operation over a symbolic link."
+            log.error(msg, path=str(path), resolved_path=str(resolved_path))
+            raise SuspiciousFileOperation(msg)
+
+        docroot = Path(settings.DOCROOT).resolve()
+        if not resolved_path.is_relative_to(docroot):
+            msg = "Suspicious operation outside the docroot directory."
+            log.error(msg, path=str(path), resolved_path=str(resolved_path))
+            raise SuspiciousFileOperation(msg)
+
+    @cached_property
+    def _rclone(self):
+        raise NotImplementedError
+
+    def rclone_sync_directory(self, source, destination):
+        """Sync a directory recursively to storage using rclone sync."""
+        if destination in ("", "/"):
+            raise SuspiciousFileOperation("Syncing all storage cannot be right")
+
+        self._check_suspicious_path(source)
+        return self._rclone.sync(source, destination)
+
+    def rclone_download_directory(self, source, destination, include=None):
+        """
+        Download a directory recursively from storage using rclone copy.
+
+        A missing source directory results in an empty local copy,
+        mimicking what walking a missing storage path does.
+        """
+        # Require at least ``<media_type>/<project>`` so a bad caller can't
+        # pull the whole bucket or a whole media type to local disk.
+        if len([part for part in source.split("/") if part]) < 2:
+            raise SuspiciousFileOperation("Downloading a whole storage prefix cannot be right")
+
+        try:
+            return self._rclone.copy_to_local(source, destination, include=include)
+        except subprocess.CalledProcessError as exc:
+            if exc.returncode != RCLONE_EXIT_DIR_NOT_FOUND:
+                raise
+            # Exit code 3 also covers an unreachable or misconfigured bucket.
+            # Only treat it as an empty source when the storage responds,
+            # so a misconfiguration fails instead of emptying the version.
+            self.listdir("")
+
+    def delete_directory(self, path):
+        raise NotImplementedError
+
+    def delete_paths(self, paths):
+        """
+        Delete multiple paths from storage.
+
+        This is a convenience method to delete multiple paths at once, which can be more efficient
+        for some storage backends that support batch deletion (eg. S3).
+        """
+        for path in paths:
+            self.delete(path)
+
+    def join(self, directory, filepath):
+        raise NotImplementedError
+
+    def walk(self, path) -> Iterator[tuple[str, list[str], list[str]]]:
+        """
+        Walk the directory tree under the given path.
+
+        This is a generator that yields tuples of (dirpath, dirnames, filenames) for each directory in the tree.
+
+        Note that dirpath is relative to the storage root, not absolute.
+        """
+        if path in ("", "/"):
+            raise SuspiciousFileOperation("Iterating all storage cannot be right")
+
+        log.debug("Walking path in storage", path=path)
+        folders, files = self.listdir(path)
+
+        yield path, folders, files
+
+        for folder_name in folders:
+            if folder_name:
+                # Recursively walk the subdirectory
+                yield from self.walk(self.join(path, folder_name))
 
 
 class OverrideHostnameMixin:
-
     """
     Override the hostname when outputting URLs.
 
@@ -13,7 +124,7 @@ class OverrideHostnameMixin:
     See: https://github.com/jschneier/django-storages/pull/658
     """
 
-    override_hostname = None    # Just the hostname without scheme (eg. 'assets.readthedocs.org')
+    override_hostname = None  # Just the hostname without scheme (eg. 'assets.readthedocs.org')
 
     def url(self, *args, **kwargs):
         url = super().url(*args, **kwargs)
@@ -27,12 +138,11 @@ class OverrideHostnameMixin:
 
 
 class S3PrivateBucketMixin:
-
     """Make the bucket private and use auth querystring."""
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
 
-        self.bucket_acl = 'private'
-        self.default_acl = 'private'
+        self.bucket_acl = "private"
+        self.default_acl = "private"
         self.querystring_auth = True

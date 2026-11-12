@@ -1,28 +1,23 @@
 """Utilities for the builds app."""
+
 from contextlib import contextmanager
 from time import monotonic
 
 from django.core.cache import cache
 
-from readthedocs.builds.constants import (
-    EXTERNAL,
-    GENERIC_EXTERNAL_VERSION_NAME,
-    GITHUB_EXTERNAL_VERSION_NAME,
-    GITLAB_EXTERNAL_VERSION_NAME,
-)
-from readthedocs.projects.constants import (
-    BITBUCKET_REGEXS,
-    GITHUB_BRAND,
-    GITHUB_PULL_REQUEST_URL,
-    GITHUB_REGEXS,
-    GITLAB_BRAND,
-    GITLAB_MERGE_REQUEST_URL,
-    GITLAB_REGEXS,
-)
+from readthedocs.builds.constants import EXTERNAL
+from readthedocs.builds.constants import GENERIC_EXTERNAL_VERSION_NAME
+from readthedocs.builds.constants import GITHUB_EXTERNAL_VERSION_NAME
+from readthedocs.builds.constants import GITLAB_EXTERNAL_VERSION_NAME
+from readthedocs.projects.constants import BITBUCKET_REGEXS
+from readthedocs.projects.constants import GITHUB_PULL_REQUEST_URL
+from readthedocs.projects.constants import GITHUB_REGEXS
+from readthedocs.projects.constants import GITLAB_MERGE_REQUEST_URL
+from readthedocs.projects.constants import GITLAB_REGEXS
 
 
 def get_github_username_repo(url):
-    if 'github' in url:
+    if "github" in url:
         for regex in GITHUB_REGEXS:
             match = regex.search(url)
             if match:
@@ -31,7 +26,7 @@ def get_github_username_repo(url):
 
 
 def get_bitbucket_username_repo(url=None):
-    if 'bitbucket' in url:
+    if "bitbucket" in url:
         for regex in BITBUCKET_REGEXS:
             match = regex.search(url)
             if match:
@@ -40,7 +35,7 @@ def get_bitbucket_username_repo(url=None):
 
 
 def get_gitlab_username_repo(url=None):
-    if 'gitlab' in url:
+    if "gitlab" in url:
         for regex in GITLAB_REGEXS:
             match = regex.search(url)
             if match:
@@ -56,31 +51,31 @@ def get_vcs_url(*, project, version_type, version_name):
     External version example: https://github.com/rtfd/readthedocs.org/pull/99/.
     """
     if version_type == EXTERNAL:
-        if 'github' in project.repo:
+        if "github" in project.repo:
             user, repo = get_github_username_repo(project.repo)
             return GITHUB_PULL_REQUEST_URL.format(
                 user=user,
                 repo=repo,
                 number=version_name,
             )
-        if 'gitlab' in project.repo:
+        if "gitlab" in project.repo:
             user, repo = get_gitlab_username_repo(project.repo)
             return GITLAB_MERGE_REQUEST_URL.format(
                 user=user,
                 repo=repo,
                 number=version_name,
             )
-        # TODO: Add VCS URL for BitBucket.
-        return ''
+        # TODO: Add VCS URL for Bitbucket.
+        return ""
 
-    url = ''
-    if ('github' in project.repo) or ('gitlab' in project.repo):
-        url = f'/tree/{version_name}/'
-    elif 'bitbucket' in project.repo:
-        url = f'/src/{version_name}'
+    url = ""
+    if ("github" in project.repo) or ("gitlab" in project.repo):
+        url = f"/tree/{version_name}/"
+    elif "bitbucket" in project.repo:
+        url = f"/src/{version_name}"
 
     # TODO: improve this replacing
-    return project.repo.replace('git://', 'https://').replace('.git', '') + url
+    return project.repo.replace("git://", "https://").replace(".git", "") + url
 
 
 def external_version_name(build_or_version):
@@ -90,13 +85,13 @@ def external_version_name(build_or_version):
 
     project = build_or_version.project
 
-    if project.git_provider_name == GITHUB_BRAND:
+    if project.is_github_project:
         return GITHUB_EXTERNAL_VERSION_NAME
 
-    if project.git_provider_name == GITLAB_BRAND:
+    if project.is_gitlab_project:
         return GITLAB_EXTERNAL_VERSION_NAME
 
-    # TODO: Add External Version Name for BitBucket.
+    # TODO: Add External Version Name for Bitbucket.
     return GENERIC_EXTERNAL_VERSION_NAME
 
 

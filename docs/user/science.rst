@@ -1,5 +1,9 @@
-Read the Docs for Science
-=========================
+Documentation in scientific and academic publishing
+===================================================
+
+On this page, we explore some of the many tools and practices that *software* documentation and *academic* writing share.
+If you are working within the field of science or academia,
+this page can be used as an introduction.
 
 .. 2022-08-10
 .. Notes about this section:
@@ -20,8 +24,7 @@ Documentation and technical writing are broad fields.
 Their tools and practices have grown relevant to most scientific activities.
 This includes building publications, books, educational resources, interactive data science, resources for data journalism and full-scale websites for research projects and courses.
 
-Let's explore the overlap of features for software documentation and academic writing.
-Here's a brief overview of some :doc:`features <features>` that people in science and academic writing love about Read the Docs:
+Here's a brief overview of some :doc:`features </reference/features>` that people in science and academic writing love about Read the Docs:
 
 .. dropdown:: 🪄 Easy to use
     :open:
@@ -69,9 +72,14 @@ Here's a brief overview of some :doc:`features <features>` that people in scienc
 
     Build and publish your project for every change made through Git (GitHub, GitLab, Bitbucket etc). Preview changes via pull requests. Receive notifications when something is wrong. How does this work? Have a look at this video:
 
-    .. video:: https://anti-pattern-sphinx-video-downloader.readthedocs.io/_static/videos/enable-pull-request-builders.mp4
-       :width: 100%
-       :height: 300
+    .. raw:: html
+
+        <video controls height="300" preload="auto">
+          <source
+            src="https://anti-pattern-sphinx-video-downloader.readthedocs.io/_static/videos/enable-pull-request-builders.mp4"
+            type="video/mp4"
+          >
+        </video>
 
 .. dropdown:: 💬 Collaboration and community
 
@@ -99,7 +107,7 @@ Here's a brief overview of some :doc:`features <features>` that people in scienc
     Search analytics
         What are people searching for and do they get hits? From each search query in your documentation, we collect a neat little statistic that can help to improve the discoverability and relevance of your documentation.
 
-    SEO - Don't reinvent Search Engine Optimization
+    SEO - Don't reinvent search engine optimization
         Use built-in SEO best-practices from Sphinx, its themes and Read the Docs hosting. This can give you a good ranking on search engines as a direct outcome of simply writing and publishing your documentation project.
 
 .. dropdown:: 🌱 Grow your own solutions
@@ -111,7 +119,7 @@ We want science communities to use Read the Docs and to be part of the documenta
 Getting started: Jupyter Book
 -----------------------------
 
-:external+jupyterbook:doc:`Jupyter Book <intro>` on Read the Docs brings you the rich experience of computated `Jupyter <https://jupyter.org/>`__ documents built together with a modern documentation tool. The results are beautiful and automatically deployed websites, built with Sphinx and :doc:`Executable Book <executablebook:index>` + all the extensions available in this ecosystem.
+:external+jupyterbook:doc:`Jupyter Book <intro>` on Read the Docs brings you the rich experience of computed `Jupyter <https://jupyter.org/>`__ documents built together with a modern documentation tool. The results are beautiful and automatically deployed websites, built with Sphinx and :doc:`Executable Book <executablebook:index>` + all the extensions available in this ecosystem.
 
 Here are some popular activities that are well-supported by Jupyter Book:
 
@@ -127,10 +135,10 @@ Here are some popular activities that are well-supported by Jupyter Book:
 Ready to get started?
 """""""""""""""""""""
 
-.. Note that this is a deliberate repitition of a previous segment. Should it repeat? Maybe not, but for now it's nice to be sure that people see it.
+.. Note that this is a deliberate repetition of a previous segment. Should it repeat? Maybe not, but for now it's nice to be sure that people see it.
 
 * All new to this? Take the official :external+jupyterbook:doc:`Jupyter Book Tutorial » <start/your-first-book>`
-* Curious for practical code? See the list of :doc:`Example Projects » </examples>`
+* Curious for practical code? See the list of :doc:`example projects » </examples>`
 * Familiar with Sphinx? Read :doc:`How to use Jupyter notebooks in Sphinx » </guides/jupyter>`
 
 

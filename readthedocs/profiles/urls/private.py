@@ -1,8 +1,9 @@
 """URL patterns for views to modify user profiles."""
 
-from django.conf.urls import re_path
+from django.urls import path
 
 from readthedocs.profiles import views
+
 
 # Split URLs into different lists to be able to selectively import them from a
 # another application (like Read the Docs Corporate), where we may don't need to
@@ -10,55 +11,65 @@ from readthedocs.profiles import views
 urlpatterns = []
 
 account_urls = [
-    re_path(
-        r'^login',
+    path(
+        "login/",
         views.LoginView.as_view(),
-        name='account_login',
+        name="account_login",
     ),
-    re_path(
-        r'^logout/',
+    path(
+        "logout/",
         views.LogoutView.as_view(),
-        name='account_logout',
+        name="account_logout",
     ),
-    re_path(
-        r'^edit/',
+    path(
+        "edit/",
         views.ProfileEdit.as_view(),
-        name='profiles_profile_edit',
+        name="profiles_profile_edit",
     ),
-    re_path(
-        r'^delete/',
+    path(
+        "delete/",
         views.AccountDelete.as_view(),
-        name='delete_account',
+        name="delete_account",
     ),
-    re_path(
-        r'security-log/',
+    path(
+        "security-log/",
         views.UserSecurityLogView.as_view(),
-        name='profiles_security_log',
+        name="profiles_security_log",
     ),
-    re_path(
-        r'^advertising/$',
+    path(
+        "preferences/",
+        views.UserProfileDashboardPreferencesEdit.as_view(),
+        name="profiles_dashboard_preferences_edit",
+    ),
+    path(
+        "advertising/",
         views.AccountAdvertisingEdit.as_view(),
-        name='account_advertising',
+        name="account_advertising",
+    ),
+    path(
+        "migrate-to-github-app/",
+        views.MigrateToGitHubAppView.as_view(),
+        name="migrate_to_github_app",
     ),
 ]
 
 urlpatterns += account_urls
 
 tokens_urls = [
-    re_path(
-        r'^tokens/$',
+    path(
+        "tokens/",
         views.TokenListView.as_view(),
-        name='profiles_tokens',
+        name="profiles_tokens",
     ),
-    re_path(
-        r'^tokens/create/$',
+    path(
+        "tokens/create/",
         views.TokenCreateView.as_view(),
-        name='profiles_tokens_create',
+        name="profiles_tokens_create",
     ),
-    re_path(
-        r'^tokens/delete/$',
+    path(
+        "tokens/delete/",
         views.TokenDeleteView.as_view(),
-        name='profiles_tokens_delete',
+        name="profiles_tokens_delete",
     ),
 ]
 

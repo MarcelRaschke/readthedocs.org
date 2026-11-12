@@ -1,13 +1,18 @@
 import pytest
+from django_dynamic_fixture import get
 
+from readthedocs.builds.constants import LATEST
+from readthedocs.projects.constants import PUBLIC
+from readthedocs.projects.models import HTMLFile
+from readthedocs.projects.models import Project
+from readthedocs.search.documents import PageDocument
 from readthedocs.search.faceted_search import PageSearch
 
 
 @pytest.mark.django_db
 @pytest.mark.search
 class TestPageSearch:
-
-    @pytest.mark.parametrize('case', ['upper', 'lower', 'title'])
+    @pytest.mark.parametrize("case", ["upper", "lower", "title"])
     def test_search_exact_match(self, client, project, case):
         """Check quoted query match exact phrase with case insensitively
 
@@ -25,13 +30,14 @@ class TestPageSearch:
         results = page_search.execute()
 
         assert len(results) == 2
-        assert results[0]['project'] == 'kuma'
-        assert results[0]['path'] == 'testdocumentation'
-        assert results[0]['version'] == 'stable'
 
-        assert results[1]['project'] == 'kuma'
-        assert results[1]['path'] == 'testdocumentation'
-        assert results[1]['version'] == 'latest'
+        # Both versions have the same exact content.
+        # Order of results is not deterministic anymore for some reason,
+        # so we use a set to compare the results.
+        assert {result["version"] for result in results} == {"stable", "latest"}
+        for result in results:
+            assert result["project"] == "kuma"
+            assert result["path"] == "testdocumentation"
 
     def test_search_combined_result(self, client, project):
         """Check search result are combined of both `AND` and `OR` operator
@@ -41,17 +47,34 @@ class TestPageSearch:
         - Where both `Foo Bar` is present
         - Where `Foo` or `Bar` is present
         """
-        query = 'Elasticsearch Query'
+        query = "Elasticsearch Query"
         page_search = PageSearch(query=query)
         results = page_search.execute()
         assert len(results) == 6
 
-        result_paths_latest = [r.path for r in results if r.version == 'latest']
-        result_paths_stable = [r.path for r in results if r.version == 'stable']
+        result_paths_latest = [r.path for r in results if r.version == "latest"]
+        result_paths_stable = [r.path for r in results if r.version == "stable"]
         # ``guides/wipe-environment`` page has both ``Elasticsearch Query`` words
         # ``docker`` page has ``Elasticsearch`` word
         # ``installation`` page has ``Query`` word.
-        expected_paths = ['guides/wipe-environment', 'docker', 'installation']
+        expected_paths = ["guides/wipe-environment", "docker", "installation"]
 
         assert result_paths_latest == expected_paths
         assert result_paths_stable == expected_paths
+
+
+@pytest.mark.django_db
+@pytest.mark.search
+def test_page_scored_by_best_matching_section(es_index, mock_processed_json):
+    project = get(Project, slug="community", privacy_level=PUBLIC, versions=[])
+    version = project.versions.get(slug=LATEST)
+    html_files = [
+        get(HTMLFile, project=project, version=version, name=name, path=name, build=1)
+        for name in ("slack.html", "recap.html")
+    ]
+    PageDocument().update(html_files)
+
+    page_search = PageSearch(query="slack", projects={"community": LATEST})
+    paths = [result.path for result in page_search.execute()]
+
+    assert paths == ["slack", "recap"]

@@ -1,13 +1,22 @@
+from django.test import override_settings
+from django.utils import timezone
 import django_dynamic_fixture as fixture
 import pytest
 
 from readthedocs.builds.models import Build
 from readthedocs.organizations.models import Organization
 from readthedocs.projects.models import Project
+from readthedocs.subscriptions.constants import TYPE_CONCURRENT_BUILDS
+from readthedocs.subscriptions.products import RTDProductFeature
 
 
 @pytest.mark.django_db
 class TestBuildQuerySet:
+    @pytest.fixture(autouse=True)
+    def setup_method(self, settings):
+        settings.RTD_DEFAULT_FEATURES = dict(
+            [RTDProductFeature(type=TYPE_CONCURRENT_BUILDS, value=4).to_item()]
+        )
 
     def test_concurrent_builds(self):
         project = fixture.get(
@@ -22,13 +31,46 @@ class TestBuildQuerySet:
                 state=state,
             )
         assert (False, 2, 4) == Build.objects.concurrent(project)
-        for state in ('building', 'cloning'):
+        for state in ("building", "cloning"):
             fixture.get(
                 Build,
                 project=project,
                 state=state,
             )
         assert (True, 4, 4) == Build.objects.concurrent(project)
+
+    def test_concurrent_builds_dispatched_triggered_counts(self):
+        """
+        A dispatched isolated build counts even while still ``triggered``.
+
+        Once ``admit_project_builds`` dispatches a build to the
+        build-isolated fleet (``dispatched_date`` set), it occupies a slot
+        even while it waits in ``triggered`` for a builder to pick it up. A
+        build still genuinely queued (no ``dispatched_date``) does not count.
+        """
+        project = fixture.get(
+            Project,
+            max_concurrent_builds=None,
+            main_language_project=None,
+        )
+        # Genuinely queued: triggered, not yet dispatched -> does not count.
+        fixture.get(
+            Build,
+            project=project,
+            state="triggered",
+            dispatched_date=None,
+        )
+        assert (False, 0, 4) == Build.objects.concurrent(project)
+
+        # Dispatched to the fleet but not yet picked up: still triggered,
+        # but it now occupies a slot.
+        fixture.get(
+            Build,
+            project=project,
+            state="triggered",
+            dispatched_date=timezone.now(),
+        )
+        assert (False, 1, 4) == Build.objects.concurrent(project)
 
     def test_concurrent_builds_project_limited(self):
         project = fixture.get(
@@ -63,7 +105,7 @@ class TestBuildQuerySet:
             )
         assert (False, 2, 4) == Build.objects.concurrent(translation)
 
-        for state in ('building', 'cloning'):
+        for state in ("building", "cloning"):
             fixture.get(
                 Build,
                 project=translation,
@@ -72,6 +114,7 @@ class TestBuildQuerySet:
         assert (True, 4, 4) == Build.objects.concurrent(translation)
         assert (True, 4, 4) == Build.objects.concurrent(project)
 
+    @override_settings(RTD_ALLOW_ORGANIZATIONS=True)
     def test_concurrent_builds_organization(self):
         organization = fixture.get(
             Organization,
@@ -96,7 +139,7 @@ class TestBuildQuerySet:
 
         project = organization.projects.first()
         assert (True, 4, 4) == Build.objects.concurrent(project)
-        for state in ('building', 'cloning'):
+        for state in ("building", "cloning"):
             fixture.get(
                 Build,
                 project=project,
@@ -104,6 +147,7 @@ class TestBuildQuerySet:
             )
         assert (True, 6, 4) == Build.objects.concurrent(project)
 
+    @override_settings(RTD_ALLOW_ORGANIZATIONS=True)
     def test_concurrent_builds_organization_limited(self):
         organization = fixture.get(
             Organization,
@@ -131,6 +175,7 @@ class TestBuildQuerySet:
         # from ``project_with_builds`` as well
         assert (False, 2, 10) == Build.objects.concurrent(project_without_builds)
 
+    @override_settings(RTD_ALLOW_ORGANIZATIONS=True)
     def test_concurrent_builds_organization_and_project_limited(self):
         organization = fixture.get(
             Organization,

@@ -2,14 +2,13 @@ from django.contrib.auth.models import User
 from django.test import TestCase
 from django_dynamic_fixture import get
 
-from readthedocs.builds.constants import EXTERNAL, LATEST
+from readthedocs.builds.constants import EXTERNAL, INTERNAL, LATEST
 from readthedocs.builds.models import Version
 from readthedocs.projects.constants import PRIVATE, PUBLIC
 from readthedocs.projects.models import Project
 
 
 class TestVersionQuerySetBase(TestCase):
-
     def setUp(self):
         self.user = get(User)
         self.another_user = get(User)
@@ -100,7 +99,6 @@ class TestVersionQuerySetBase(TestCase):
 
 
 class VersionQuerySetTests(TestVersionQuerySetBase):
-
     def test_public(self):
         query = Version.objects.public()
         versions = {
@@ -116,15 +114,15 @@ class VersionQuerySetTests(TestVersionQuerySetBase):
 
     def test_public_user(self):
         query = Version.objects.public(user=self.user)
-        versions = (
-            self.user_versions |
-            {self.another_version_latest, self.another_version}
-        )
+        versions = self.user_versions | {
+            self.another_version_latest,
+            self.another_version,
+        }
         self.assertEqual(query.count(), len(versions))
         self.assertEqual(set(query), versions)
 
     def test_public_project(self):
-        query = Version.objects.public(user=self.user, project=self.project)
+        query = self.project.versions.public(user=self.user)
         versions = {
             self.version,
             self.version_latest,
@@ -148,7 +146,6 @@ class VersionQuerySetTests(TestVersionQuerySetBase):
 
 
 class TestVersionQuerySetWithManagerBase(TestVersionQuerySetBase):
-
     def setUp(self):
         super().setUp()
 
@@ -187,14 +184,14 @@ class TestVersionQuerySetWithManagerBase(TestVersionQuerySetBase):
             project=self.shared_project,
             active=True,
             type=EXTERNAL,
-            privacy_level=PUBLIC
+            privacy_level=PUBLIC,
         )
         self.shared_external_version_private = get(
             Version,
             project=self.shared_project,
             active=True,
             type=EXTERNAL,
-            privacy_level=PRIVATE
+            privacy_level=PRIVATE,
         )
 
 
@@ -238,15 +235,15 @@ class VersionQuerySetWithInternalManagerTest(TestVersionQuerySetWithManagerBase)
 
     def test_public_user(self):
         query = Version.internal.public(user=self.user)
-        versions = (
-            self.user_versions |
-            {self.another_version_latest, self.another_version}
-        )
+        versions = self.user_versions | {
+            self.another_version_latest,
+            self.another_version,
+        }
         self.assertEqual(query.count(), len(versions))
         self.assertEqual(set(query), versions)
 
     def test_public_project(self):
-        query = Version.internal.public(user=self.user, project=self.project)
+        query = self.project.versions(manager=INTERNAL).public(user=self.user)
         versions = {
             self.version,
             self.version_latest,
@@ -344,7 +341,7 @@ class VersionQuerySetWithExternalManagerTest(TestVersionQuerySetWithManagerBase)
         self.assertEqual(set(query), versions)
 
     def test_public_project(self):
-        query = Version.external.public(user=self.user, project=self.project)
+        query = self.project.versions(manager=EXTERNAL).public(user=self.user)
         versions = {
             self.external_version_public,
             self.external_version_private,

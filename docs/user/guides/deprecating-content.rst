@@ -1,5 +1,5 @@
-Deprecating Content
-===================
+How to deprecate content
+========================
 
 When you deprecate a feature from your project,
 you may want to deprecate its docs as well,
@@ -10,6 +10,11 @@ but doing that will break existing links,
 and you don't necessary want to make the content inaccessible.
 Here you'll find some tips on how to use Read the Docs to deprecate your content
 progressively and in non harmful ways.
+
+.. seealso::
+
+   :doc:`/guides/best-practice/links`
+     More information about handling URL structures, renaming and removing content.
 
 Deprecating versions
 --------------------
@@ -24,7 +29,7 @@ For example, if you have the following versions and want to deprecate v1.
 
 For cases like this you can *hide* a version.
 Hidden versions won't be listed in the versions menu of your docs,
-and they will be listed in a :ref:`robots.txt file <hosting:custom robots.txt pages>`
+and they will be listed in a :doc:`robots.txt file </reference/robots>`
 to stop search engines of showing results for that version.
 
 Users can still see all versions in the dashboard of your project.
@@ -34,7 +39,7 @@ and mark the :guilabel:`Hidden` option. Check :ref:`versions:Version States` for
 .. note::
 
    If the versions of your project follow the semver_ convention,
-   you can activate the :ref:`versions:version warning` option for your project.
+   you can activate the :ref:`versions:version warning notifications` option for your project.
    A banner with a warning and linking to the stable version
    will be shown on all versions that are lower than the stable one.
 
@@ -52,7 +57,7 @@ For example, if you have documentation about two APIs and you want to deprecate 
 A simple way is just adding a warning at the top of the page,
 this will warn users visiting that page,
 but it won't stop users from being redirected to that page from search results.
-You can add an entry of that page in a :ref:`custom robots.txt <hosting:custom robots.txt pages>` file
+You can add an entry of that page in a :doc:`custom robots.txt </reference/robots>` file
 to avoid search engines of showing those results. For example::
 
    # robots.txt
@@ -61,7 +66,7 @@ to avoid search engines of showing those results. For example::
 
    Disallow: /en/latest/api/v1.html # Deprecated API
 
-But your users will still see search results from that page if they use the search from your docs.
+However, your users will still see search results from that page if they use the search from your docs.
 With Read the Docs you can set a :ref:`custom rank per pages <config-file/v2:search.ranking>`.
 For example:
 
@@ -91,7 +96,7 @@ Moving and deleting pages
 After you have deprecated a feature for a while,
 you may want to get rid of its documentation,
 that's OK, you don't have to maintain that content forever.
-But be aware that users may have links of that page saved,
+However, be aware that users may have links of that page saved,
 and it will be frustrating and confusing for them to get a 404.
 
 To solve that problem you can create a redirect to a page with a similar feature/content,

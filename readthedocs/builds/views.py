@@ -4,37 +4,41 @@ import textwrap
 from urllib.parse import urlparse
 
 import structlog
-from django.conf import settings
-from django.contrib import messages
 from django.contrib.auth.decorators import login_required
-from django.http import HttpResponseForbidden, HttpResponseRedirect
+from django.http import HttpResponseForbidden
+from django.http import HttpResponseRedirect
 from django.shortcuts import get_object_or_404
 from django.urls import reverse
 from django.utils.decorators import method_decorator
-from django.views.generic import DetailView, ListView
+from django.views.generic import DetailView
+from django.views.generic import ListView
 from requests.utils import quote
 
-from readthedocs.builds.constants import (
-    BUILD_FINAL_STATES,
-    BUILD_STATE_CANCELLED,
-    BUILD_STATE_TRIGGERED,
-)
+from readthedocs.builds.constants import BUILD_FINAL_STATES
+from readthedocs.builds.constants import INTERNAL
 from readthedocs.builds.filters import BuildListFilter
-from readthedocs.builds.models import Build, Version
+from readthedocs.builds.models import Build
+from readthedocs.core.filters import FilterContextMixin
 from readthedocs.core.permissions import AdminPermission
-from readthedocs.core.utils import cancel_build, trigger_build
+from readthedocs.core.utils import cancel_build
+from readthedocs.core.utils.objects import cached_method
 from readthedocs.doc_builder.exceptions import BuildAppError
 from readthedocs.projects.models import Project
+from readthedocs.projects.views.base import ProjectSpamMixin
+
 
 log = structlog.get_logger(__name__)
 
 
 class BuildBase:
-
     model = Build
 
+    # The list view calls this several times per request (filters, pagination,
+    # the active builds query); each call resolved the project and the
+    # permission queryset again.
+    @cached_method
     def get_queryset(self):
-        self.project_slug = self.kwargs.get('project_slug', None)
+        self.project_slug = self.kwargs.get("project_slug", None)
         self.project = get_object_or_404(
             Project.objects.public(self.request.user),
             slug=self.project_slug,
@@ -42,93 +46,30 @@ class BuildBase:
         queryset = Build.objects.public(
             user=self.request.user,
             project=self.project,
-        ).select_related('project', 'version')
+        ).select_related("project", "version")
 
         return queryset
 
 
-class BuildTriggerMixin:
-
-    @method_decorator(login_required)
-    def post(self, request, project_slug):
-        commit_to_retrigger = None
-        project = get_object_or_404(Project, slug=project_slug)
-
-        if not AdminPermission.is_admin(request.user, project):
-            return HttpResponseForbidden()
-
-        version_slug = request.POST.get('version_slug')
-        build_pk = request.POST.get('build_pk')
-
-        if build_pk:
-            # Filter over external versions only when re-triggering a specific build
-            version = get_object_or_404(
-                Version.external.public(self.request.user),
-                slug=version_slug,
-                project=project,
-            )
-
-            build_to_retrigger = get_object_or_404(
-                Build.objects.all(),
-                pk=build_pk,
-                version=version,
-            )
-            if build_to_retrigger != Build.objects.filter(version=version).first():
-                messages.add_message(
-                    request,
-                    messages.ERROR,
-                    "This build can't be re-triggered because it's "
-                    "not the latest build for this version.",
-                )
-                return HttpResponseRedirect(request.path)
-
-            # Set either the build to re-trigger it or None
-            if build_to_retrigger:
-                commit_to_retrigger = build_to_retrigger.commit
-                log.info(
-                    'Re-triggering build.',
-                    project_slug=project.slug,
-                    version_slug=version.slug,
-                    build_commit=build_to_retrigger.commit,
-                    build_id=build_to_retrigger.pk,
-                )
-        else:
-            # Use generic query when triggering a normal build
-            version = get_object_or_404(
-                self._get_versions(project),
-                slug=version_slug,
-            )
-
-        update_docs_task, build = trigger_build(
-            project=project,
-            version=version,
-            commit=commit_to_retrigger,
-        )
-        if (update_docs_task, build) == (None, None):
-            # Build was skipped
-            messages.add_message(
-                request,
-                messages.WARNING,
-                "This project is currently disabled and can't trigger new builds.",
-            )
-            return HttpResponseRedirect(
-                reverse('builds_project_list', args=[project.slug]),
-            )
-
-        return HttpResponseRedirect(
-            reverse('builds_detail', args=[project.slug, build.pk]),
-        )
+class BuildList(
+    FilterContextMixin,
+    ProjectSpamMixin,
+    BuildBase,
+    ListView,
+):
+    filterset_class = BuildListFilter
 
     def _get_versions(self, project):
-        return Version.internal.public(
+        project.versions(manager=INTERNAL).public(
             user=self.request.user,
-            project=project,
         )
 
+    def get_project(self):
+        # Call ``.get_queryset()`` to get the current project from ``kwargs``
+        self.get_queryset()
+        return self.project
 
-class BuildList(BuildBase, BuildTriggerMixin, ListView):
-
-    def get_context_data(self, **kwargs):  # pylint: disable=arguments-differ
+    def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
 
         active_builds = (
@@ -139,23 +80,26 @@ class BuildList(BuildBase, BuildTriggerMixin, ListView):
             .values("id")
         )
 
-        context['project'] = self.project
-        context['active_builds'] = active_builds
-        context['versions'] = self._get_versions(self.project)
+        context["project"] = self.project
+        context["active_builds"] = active_builds
+        context["versions"] = self._get_versions(self.project)
 
         builds = self.get_queryset()
-        if settings.RTD_EXT_THEME_ENABLED:
-            filter = BuildListFilter(self.request.GET, queryset=builds)
-            context['filter'] = filter
-            builds = filter.qs
-        context['build_qs'] = builds
+        context["filter"] = self.get_filterset(
+            queryset=builds,
+            project=self.project,
+        )
+        builds = self.get_filtered_queryset()
+        context["build_qs"] = builds
 
         return context
 
 
-class BuildDetail(BuildBase, DetailView):
+class BuildDetail(BuildBase, ProjectSpamMixin, DetailView):
+    pk_url_kwarg = "build_pk"
 
-    pk_url_kwarg = 'build_pk'
+    def get_project(self):
+        return self.get_object().project
 
     @method_decorator(login_required)
     def post(self, request, project_slug, build_pk):
@@ -168,23 +112,21 @@ class BuildDetail(BuildBase, DetailView):
         cancel_build(build)
 
         return HttpResponseRedirect(
-            reverse('builds_detail', args=[project.slug, build.pk]),
+            reverse("builds_detail", args=[project.slug, build.pk]),
         )
 
     def get_context_data(self, **kwargs):
         context = super().get_context_data(**kwargs)
-        context['project'] = self.project
+        context["project"] = self.project
 
         build = self.get_object()
-
-        if build.error != BuildAppError.GENERIC_WITH_BUILD_ID.format(build_id=build.pk):
+        context["notifications"] = build.notifications.all()
+        if not build.notifications.filter(message_id=BuildAppError.GENERIC_WITH_BUILD_ID).exists():
             # Do not suggest to open an issue if the error is not generic
             return context
 
         scheme = (
-            'https://github.com/rtfd/readthedocs.org/issues/new'
-            '?title={title}{build_id}'
-            '&body={body}'
+            "https://github.com/rtfd/readthedocs.org/issues/new?title={title}{build_id}&body={body}"
         )
 
         # TODO: we could use ``.github/ISSUE_TEMPLATE.md`` here, but we would
@@ -210,12 +152,13 @@ class BuildDetail(BuildBase, DetailView):
         )
 
         scheme_dict = {
-            'title': quote('Build error with build id #'),
-            'build_id': context['build'].id,
-            'body': quote(textwrap.dedent(body)),
+            "title": quote("Build error with build id #"),
+            "build_id": context["build"].id,
+            "body": quote(textwrap.dedent(body)),
         }
 
         issue_url = scheme.format(**scheme_dict)
         issue_url = urlparse(issue_url).geturl()
-        context['issue_url'] = issue_url
+        context["issue_url"] = issue_url
+
         return context

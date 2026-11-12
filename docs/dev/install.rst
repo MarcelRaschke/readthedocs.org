@@ -1,11 +1,11 @@
-Development Installation
+Development installation
 ========================
 
 .. meta::
    :description lang=en: Install a local development instance of Read the Docs with our step by step guide.
 
-These are development setup and :ref:`standards <install:Core team standards>` that are followed to by the core development team. If you are a contributor to Read the Docs,
-it might a be a good idea to follow these guidelines as well.
+These are development setup and :ref:`standards <install:Core team standards>` that are followed to by the core development team.
+If you are a contributor to Read the Docs, it might a be a good idea to follow these guidelines as well.
 
 Requirements
 ------------
@@ -23,20 +23,52 @@ A development setup can be hosted by your laptop, in a VM, on a separate server 
    We do not recommend to follow this guide to deploy an instance of Read the Docs for production.
 
 
+Install external dependencies (Docker, Docker Compose, gVisor)
+--------------------------------------------------------------
+
+#. Install Docker by following `the official guide <https://docs.docker.com/get-docker/>`_.
+#. Install Docker Compose with `the official instructions <https://docs.docker.com/compose/install/>`_.
+#. Install and set up gVisor following :doc:`/guides/gvisor`.
+
+
 Set up your environment
 -----------------------
 
-#. Clone the ``readthedocs.org`` repository:
+#. Clone all the required repositories:
 
    .. prompt:: bash
 
       git clone --recurse-submodules https://github.com/readthedocs/readthedocs.org/
+      git clone --recurse-submodules https://github.com/readthedocs/ext-theme/
+      git clone --recurse-submodules https://github.com/readthedocs/addons/
+
+#. Install or clone additional repositories:
+
+   .. note::
+
+      This step is only required for Read the Docs core team members.
+
+   Core team should at very least have all required packages installed in their development image.
+   To install these packages you must define a GitHub token before building your image:
+
+   .. prompt:: bash
+
+      export GITHUB_TOKEN="..."
+      export GITHUB_USER="..."
+
+   In order to make development changes on any of our private repositories,
+   such as ``readthedocs-ext``, you will also need to check these repositories out:
+
+   .. prompt:: bash
+
+      git clone --recurse-submodules https://github.com/readthedocs/readthedocs-ext/
 
 #. Install the requirements from ``common`` submodule:
 
    .. prompt:: bash
 
       pip install -r common/dockerfiles/requirements.txt
+
 
 #. Build the Docker image for the servers:
 
@@ -48,22 +80,23 @@ Set up your environment
 
       inv docker.build
 
-   .. tip::
-
-      If you pass the ``GITHUB_TOKEN`` and ``GITHUB_USER`` environment variables to this command,
-      it will add support for readthedocs-ext.
 
 #. Pull down Docker images for the builders:
 
    .. prompt:: bash
 
-      inv docker.pull --only-required
+      inv docker.pull
 
 #. Start all the containers:
 
    .. prompt:: bash
 
-      inv docker.up  --init  # --init is only needed the first time
+      inv docker.up  --init
+
+   .. warning::
+
+      ``--init`` is only needed the first time.
+
 
 #. Go to http://devthedocs.org to access your local instance of Read the Docs.
 
@@ -77,6 +110,12 @@ Check that everything works
 
 #. Go to the "Read the Docs" project, under section :guilabel:`Build a version`, click on the :guilabel:`Build version` button selecting "latest",
    and wait until it finishes (this can take several minutes).
+
+.. warning::
+
+   Read the Docs will compile the Python/Node.js/Rust/Go version on-the-fly each time when building the documentation.
+   To speed things up, you can pre-compile and cache all these versions by using ``inv docker.compilebuildtool`` command.
+   *We strongly recommend to pre-compile these versions if you want to build documentation on your development instance.*
 
 #. Click on the "View docs" button to browse the documentation, and verify that it shows the Read the Docs documentation page.
 
@@ -97,7 +136,10 @@ save some work while typing docker compose commands. This section explains these
     * ``--init`` is used the first time this command is ran to run initial migrations, create an admin user, etc
     * ``--no-reload`` makes all celery processes and django runserver
       to use no reload and do not watch for files changes
-    * ``--ngrok`` is useful when it's required to access the local instance from outside (e.g. GitHub webhook)
+    * ``--no-django-debug`` runs all containers with ``DEBUG=False``
+    * ``--http-domain`` configures an external domain for the environment (useful for Ngrok or other http proxy).
+      Note that https proxies aren't supported.
+      There will also be issues with "suspicious domain" failures on Proxito.
 
 ``inv docker.shell``
     Opens a shell in a container (web by default).
@@ -108,9 +150,42 @@ save some work while typing docker compose commands. This section explains these
 ``inv docker.manage {command}``
     Executes a Django management command in a container.
 
+    * ``--backupdb`` creates a database backup before running the command.
+      The backup is saved to the current directory with a timestamped filename:
+      ``dump_<DD-MM-YYYY>_<HH_MM_SS>__<git-hash>.sql``
+
     .. tip::
 
        Useful when modifying models to run ``makemigrations``.
+
+    .. tip::
+
+       Use ``--backupdb`` when running ``migrate`` to create a backup before applying migrations:
+
+       .. code-block:: bash
+
+          inv docker.manage --backupdb migrate
+
+       To restore from this backup, follow these steps:
+
+       .. code-block:: bash
+
+          # Start only the database container
+          inv docker.compose 'start database'
+
+          # Copy the backup file into the container (replace with your actual filename)
+          docker cp dump_24-11-2025_10_30_00__abc1234.sql community-database-1:/tmp/dump.sql
+
+          # Open a shell in the database container
+          inv docker.shell --container database
+
+       Then inside the database container:
+
+       .. code-block:: bash
+
+          dropdb -U docs_user docs_db
+          createdb -U docs_user docs_db
+          psql -U docs_user docs_db < /tmp/dump.sql
 
 ``inv docker.down``
     Stops and removes all containers running.
@@ -136,15 +211,19 @@ save some work while typing docker compose commands. This section explains these
 ``inv docker.test``
     Runs all the test suites inside the container.
 
-    * ``--arguments`` will pass arguments to Tox command (e.g. ``--arguments "-e py310 -- -k test_api"``)
+    * ``--arguments`` will pass arguments to Tox command (e.g. ``--arguments "-e py314 -- -k test_api"``)
 
 ``inv docker.pull``
     Downloads and tags all the Docker images required for builders.
 
-    * ``--only-required`` pulls only the image ``ubuntu-20.04``.
+    * ``--only-required`` pulls only the image ``ubuntu-26.04``.
 
 ``inv docker.buildassets``
     Build all the assets and "deploy" them to the storage.
+
+``inv docker.compilebuildtool``
+    Pre-compile and cache tools that can be specified in ``build.tools`` to speed up builds.
+    It requires ``inv docker.up`` running in another terminal to be able to upload the pre-compiled version to the cache.
 
 Adding a new Python dependency
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -192,17 +271,64 @@ The ``rdb`` debugger is similar to ``pdb``, there is no ``ipdb`` for remote
 debugging currently.
 
 
+Using a local Git repository
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+When doing local development, it's useful to use a local Git repository as the source for builds,
+rather than a remote repository (e.g. GitHub or Bitbucket).
+This reduces the iteration cycle considerably and avoids needing to fork or push to a remote repository.
+
+Since ``file://`` URLs are not supported,
+you need to serve the local repository over the ``git://`` protocol using ``git daemon``.
+
+#. Clone (or create) a repository on your host machine.
+   For example, to test a local copy of the Read the Docs documentation:
+
+   .. prompt:: bash
+
+      git clone https://github.com/readthedocs/readthedocs.org /tmp/readthedocs.org
+
+#. Start ``git daemon`` to expose the repository to the Docker containers:
+
+   .. prompt:: bash
+
+      git daemon --verbose --export-all --base-path=/tmp /tmp
+
+   This serves all repositories under ``/tmp`` on port 9418 (the default ``git://`` port).
+   Leave this process running in a separate terminal.
+
+   .. note::
+
+      ``--export-all`` allows the daemon to serve any repository,
+      without needing a ``git-daemon-export-ok`` marker file in each repo.
+      ``--base-path=/tmp`` means that ``/tmp`` is stripped from the path in URLs,
+      so ``/tmp/readthedocs.org`` is served as ``git://HOST/readthedocs.org``.
+
+#. Go to http://devthedocs.org/dashboard/import/manual/
+   and import the project manually using the ``git://`` URL.
+   The Docker network defined in ``docker-compose.override.yml`` uses the subnet ``10.10.0.0/16``,
+   so the host machine is reachable from inside the containers at ``10.10.0.1``:
+
+   .. code-block:: text
+
+      git://10.10.0.1/readthedocs.org
+
+Any subsequent builds triggered in your local Read the Docs instance will clone from your local repository.
+This means you can make changes to the repository on your host machine
+and trigger a new build without having to push to a remote.
+
+
 Configuring connected accounts
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
-These are optional steps to setup the :doc:`connected accounts <rtd:connected-accounts>`
-(GitHub, GitLab, and BitBucket) in your development environment.
+These are optional steps to setup the :doc:`connected accounts <rtd:guides/connecting-git-account>`
+(|git_providers_and|) in your development environment.
 This will allow you to login to your local development instance
 using your GitHub, Bitbucket, or GitLab credentials
 and this makes the process of importing repositories easier.
 
 However, because these services will not be able to connect back to your local development instance,
-:doc:`incoming webhooks <rtd:integrations>` will not function correctly.
+:doc:`incoming webhooks <rtd:reference/git-integration>` will not function correctly.
 For some services, the webhooks will fail to be added when the repository is imported.
 For others, the webhook will simply fail to connect when there are new commits to the repository.
 
@@ -214,15 +340,85 @@ For others, the webhook will simply fail to connect when there are new commits t
 
 * Configure the applications on GitHub, Bitbucket, and GitLab.
   For each of these, the callback URI is ``http://devthedocs.org/accounts/<provider>/login/callback/``
-  where ``<provider>`` is one of ``github``, ``gitlab``, or ``bitbucket_oauth2``.
+  where ``<provider>`` is one of ``github``, ``githubapp``, ``gitlab``, or ``bitbucket_oauth2``.
   When setup, you will be given a "Client ID" (also called an "Application ID" or just "Key") and a "Secret".
-* Take the "Client ID" and "Secret" for each service and enter it in your local Django admin at:
-  ``http://devthedocs.org/admin/socialaccount/socialapp/``.
-  Make sure to apply it to the "Site".
+* Take the "Client ID" and "Secret" for each service and set them as :ref:`environment variables <settings:Allauth secrets>`.
+
+Configuring GitHub App
+~~~~~~~~~~~~~~~~~~~~~~
+
+- Create a new GitHub app from https://github.com/settings/apps/new.
+- ``Callback URL`` should be ``http://devthedocs.org/accounts/githubapp/login/callback/``.
+- Keep marked ``Expire user authorization tokens``
+- Activate the webhook, and set the ``Webhook URL`` to one provided by a service like `Webhook.site <https://docs.webhook.site/>`__ to forward all incoming webhooks to your local development instance. Example: ``https://webhook.site/e6e53a09-1551-4942-a750-c967bc577846``
+- In permissions, select the following:
+
+  - Repository permissions
+
+    - ``Commit statuses`` (read and write, so we can create commit statuses),
+    - ``Contents`` (read only, so we can clone repos with a token),
+    - ``Metadata`` (read only, so we read the repo collaborators),
+    - ``Pull requests`` (read and write, so we can post a comment on PRs in the future).
+    - ``Checks`` (read and write, so we can use the GitHub Checks API to report the status of a build)
+
+  - Organization permissions
+
+    - ``Members`` (read only so we can read the organization members).
+
+  - Account Permissions
+
+    - ``Email addresses`` (read only, so allauth can fetch all verified emails).
+
+- Subscribe to the following events
+
+  - ``Installation target``
+  - ``Member``
+  - ``Organization``
+  - ``Membership``
+  - ``Pull request``
+  - ``Push``
+  - ``Repository``
+
+- Copy the ``Client ID`` and ``Client Secret`` and set them as :ref:`environment variables <settings:Allauth secrets>`
+
+  - ``RTD_SOCIALACCOUNT_PROVIDERS_GITHUBAPP_CLIENT_ID``
+  - ``RTD_SOCIALACCOUNT_PROVIDERS_GITHUBAPP_SECRET``
+
+- Generate a webhook secret (e.g. with ``openssl rand -hex 32``) and a private key from the GitHub App settings,
+  and set them as :ref:`environment variables <settings:GitHub App>`.
+
+  - ``RTD_GITHUB_APP_ID``
+  - ``RTD_GITHUB_APP_NAME`` (e.g. ``read-the-docs-development``)
+  - ``RTD_GITHUB_APP_PRIVATE_KEY`` (you can use ``$(cat read-the-docs.private-key.pem)`` as the value of this variable)
+  - ``RTD_GITHUB_APP_WEBHOOK_SECRET``
+
+- Then, to receive the webhooks in your local development instance using the `Webhook.site CLI <https://docs.webhook.site/cli.html>`_,
+  first install the client with:
+
+  .. prompt:: bash
+
+    npm install @webhooksite/cli
+
+  and run the following command updating the ``<hash>`` part:
+
+  .. prompt:: bash
+
+    whcli forward --token=<hash> --target=http://devthedocs.org/webhook/githubapp/
 
 
 Troubleshooting
 ---------------
+
+.. warning::
+
+    The environment is developed and mainly tested on Docker Compose v1.x.
+    If you are running Docker Compose 2.x, please make sure you have ``COMPOSE_COMPATIBILITY=true`` set.
+    This is automatically loaded via the ``.env`` file.
+    If you want to ensure that the file is loaded, run:
+
+    .. code-block:: console
+
+        source .env
 
 Builds fail with a generic error
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
@@ -267,6 +463,7 @@ you have to follow these steps:
 
 Once this is done, you should be able to trigger a new build on that project and it should succeed.
 
+
 Core team standards
 -------------------
 
@@ -293,7 +490,7 @@ Docker for builds
 
 Serve documentation under a subdomain
     There are a number of resolution bugs and cross-domain behavior that can
-    only be caught by using `USE_SUBDOMAIN` setting.
+    only be caught by using a ``PUBLIC_DOMAIN`` setting different from the ``PRODUCTION_DOMAIN`` setting.
 
 PostgreSQL as a database
     It is recommended that Postgres be used as the default database whenever
@@ -309,14 +506,17 @@ Celery is isolated from database
 Use NGINX as web server
     All the site is served via NGINX with the ability to change some configuration locally.
 
-MinIO as Django storage backend
-    All static and media files are served using Minio --an emulator of S3,
-    which is the one used in production.
+RustFS as Django storage backend
+    All static and media files are served using RustFS --an S3-compatible object storage,
+    which emulates the S3 interface used in production.
 
 Serve documentation via El Proxito
-    Documentation is proxied by NGINX to El Proxito and proxied back to NGINX to be served finally.
     El Proxito is a small application put in front of the documentation to serve files
     from the Django Storage Backend.
+
+Use Cloudflare Wrangler
+    Documentation pages are proxied by NGINX to Wrangler, who executes a JavaScript worker
+    to fetch the response from El Proxito and injects HTML tags (for addons) based on HTTP headers.
 
 Search enabled by default
     Elasticsearch is properly configured and enabled by default.

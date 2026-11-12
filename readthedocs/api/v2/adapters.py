@@ -3,7 +3,6 @@ from requests_toolbelt.adapters.host_header_ssl import HostHeaderSSLAdapter
 
 
 class TimeoutAdapter:
-
     """
     Adapter to inject ``timeout`` to all the requests.
 
@@ -15,9 +14,11 @@ class TimeoutAdapter:
     """
 
     def send(self, *args, **kwargs):
-        kwargs.update({
-            'timeout': 5,  # 5 seconds in total (connect + read)
-        })
+        kwargs.update(
+            {
+                "timeout": 5,  # 5 seconds in total (connect + read)
+            }
+        )
         return super().send(*args, **kwargs)
 
 

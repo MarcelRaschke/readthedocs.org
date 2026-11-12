@@ -5,7 +5,15 @@ from django_dynamic_fixture import get
 
 from readthedocs.organizations.models import Organization
 from readthedocs.projects.models import Project
+from readthedocs.redirects.constants import (
+    CLEAN_URL_TO_HTML_REDIRECT,
+    EXACT_REDIRECT,
+    HTML_TO_CLEAN_URL_REDIRECT,
+    PAGE_REDIRECT,
+)
 from readthedocs.redirects.models import Redirect
+from readthedocs.subscriptions.constants import TYPE_REDIRECTS_LIMIT
+from readthedocs.subscriptions.products import RTDProductFeature
 
 
 @override_settings(RTD_ALLOW_ORGANIZATIONS=False)
@@ -16,7 +24,7 @@ class TestViews(TestCase):
         self.redirect = get(
             Redirect,
             project=self.project,
-            redirect_type="exact",
+            redirect_type=EXACT_REDIRECT,
             from_url="/404.html",
             to_url="/en/latest/",
         )
@@ -27,9 +35,10 @@ class TestViews(TestCase):
         resp = self.client.post(
             reverse("projects_redirects_create", args=[self.project.slug]),
             data={
-                "redirect_type": "page",
+                "redirect_type": PAGE_REDIRECT,
                 "from_url": "/config.html",
                 "to_url": "/configuration.html",
+                "http_status": 302,
             },
         )
         self.assertEqual(resp.status_code, 302)
@@ -42,14 +51,15 @@ class TestViews(TestCase):
                 "projects_redirects_edit", args=[self.project.slug, self.redirect.pk]
             ),
             data={
-                "redirect_type": "page",
+                "redirect_type": PAGE_REDIRECT,
                 "from_url": "/config.html",
                 "to_url": "/configuration.html",
+                "http_status": 302,
             },
         )
         self.assertEqual(resp.status_code, 302)
         redirect = self.project.redirects.get()
-        self.assertEqual(redirect.redirect_type, "page")
+        self.assertEqual(redirect.redirect_type, PAGE_REDIRECT)
         self.assertEqual(redirect.from_url, "/config.html")
         self.assertEqual(redirect.to_url, "/configuration.html")
         self.assertEqual(self.project.redirects.all().count(), 1)
@@ -72,6 +82,38 @@ class TestViews(TestCase):
         self.assertContains(resp, self.redirect.from_url)
         self.assertContains(resp, self.redirect.to_url)
 
+    def test_list_redirect_filter_by_type(self):
+        get(
+            Redirect,
+            project=self.project,
+            redirect_type=PAGE_REDIRECT,
+            from_url="/config.html",
+            to_url="/configuration.html",
+        )
+        resp = self.client.get(
+            reverse("projects_redirects", args=[self.project.slug]),
+            {"redirect_type": PAGE_REDIRECT},
+        )
+        assert resp.status_code == 200
+        assert len(resp.context["redirects"]) == 1
+        assert resp.context["redirects"][0].redirect_type == PAGE_REDIRECT
+
+    def test_list_redirect_filter_by_url(self):
+        other = get(
+            Redirect,
+            project=self.project,
+            redirect_type=PAGE_REDIRECT,
+            from_url="/config.html",
+            to_url="/configuration.html",
+        )
+        resp = self.client.get(
+            reverse("projects_redirects", args=[self.project.slug]),
+            {"url": other.from_url},
+        )
+        assert resp.status_code == 200
+        pks = {r.pk for r in resp.context["redirects"]}
+        assert pks == {other.pk}
+
     def test_get_redirect(self):
         resp = self.client.get(
             reverse(
@@ -82,6 +124,235 @@ class TestViews(TestCase):
         self.assertContains(resp, self.redirect.redirect_type)
         self.assertContains(resp, self.redirect.from_url)
         self.assertContains(resp, self.redirect.to_url)
+
+    def test_redirects_position(self):
+        self.project.redirects.all().delete()
+        for msg in ["one", "two", "three"]:
+            resp = self.client.post(
+                reverse("projects_redirects_create", args=[self.project.slug]),
+                data={
+                    "redirect_type": EXACT_REDIRECT,
+                    "from_url": "/config.html",
+                    "to_url": "/configuration.html",
+                    "http_status": 302,
+                    "description": msg,
+                },
+            )
+            self.assertEqual(resp.status_code, 302)
+
+        self.assertEqual(self.project.redirects.all().count(), 3)
+
+        redirect_one = self.project.redirects.get(description="one")
+        redirect_two = self.project.redirects.get(description="two")
+        redirect_three = self.project.redirects.get(description="three")
+
+        self.assertEqual(redirect_three.position, 0)
+        self.assertEqual(redirect_two.position, 1)
+        self.assertEqual(redirect_one.position, 2)
+
+        # Move to the top
+        resp = self.client.post(
+            reverse(
+                "projects_redirects_insert",
+                args=[self.project.slug, redirect_one.pk, 0],
+            ),
+        )
+        self.assertEqual(resp.status_code, 302)
+
+        # Move down
+        resp = self.client.post(
+            reverse(
+                "projects_redirects_insert",
+                args=[self.project.slug, redirect_three.pk, 2],
+            ),
+        )
+        self.assertEqual(resp.status_code, 302)
+
+        redirect_one.refresh_from_db()
+        redirect_two.refresh_from_db()
+        redirect_three.refresh_from_db()
+        self.assertEqual(redirect_one.position, 0)
+        self.assertEqual(redirect_two.position, 1)
+        self.assertEqual(redirect_three.position, 2)
+
+        resp = self.client.post(
+            reverse(
+                "projects_redirects_delete", args=[self.project.slug, redirect_one.pk]
+            ),
+        )
+        self.assertEqual(resp.status_code, 302)
+
+        redirect_two.refresh_from_db()
+        redirect_three.refresh_from_db()
+        self.assertEqual(redirect_two.position, 0)
+        self.assertEqual(redirect_three.position, 1)
+
+    def test_redirects_validations(self):
+        url = reverse("projects_redirects_create", args=[self.project.slug])
+        resp = self.client.post(
+            url,
+            data={
+                "redirect_type": EXACT_REDIRECT,
+                "from_url": "/one/$rest",
+                "to_url": "/two/",
+                "http_status": 302,
+            },
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, "The $rest wildcard has been removed in favor of *.")
+
+        resp = self.client.post(
+            url,
+            data={
+                "redirect_type": EXACT_REDIRECT,
+                "from_url": "/one/*.html",
+                "to_url": "/two/",
+                "http_status": 302,
+            },
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(resp, "The * wildcard must be at the end of the path.")
+
+        resp = self.client.post(
+            url,
+            data={
+                "redirect_type": EXACT_REDIRECT,
+                "from_url": "/one/",
+                "to_url": "/two/:splat",
+                "http_status": 302,
+            },
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(
+            resp,
+            "The * wildcard must be at the end of from_url to use the :splat placeholder in to_url.",
+        )
+
+        get(Redirect, redirect_type=CLEAN_URL_TO_HTML_REDIRECT, project=self.project)
+        resp = self.client.post(
+            url,
+            data={
+                "redirect_type": CLEAN_URL_TO_HTML_REDIRECT,
+                "http_status": 302,
+            },
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(
+            resp,
+            "Only one redirect of type `clean_url_to_html` is allowed per project.",
+        )
+
+        get(Redirect, redirect_type=HTML_TO_CLEAN_URL_REDIRECT, project=self.project)
+        resp = self.client.post(
+            url,
+            data={
+                "redirect_type": HTML_TO_CLEAN_URL_REDIRECT,
+                "from_url": "/one/",
+                "to_url": "/two/",
+                "http_status": 302,
+            },
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(
+            resp,
+            "Only one redirect of type `html_to_clean_url` is allowed per project.",
+        )
+
+    @override_settings(
+        RTD_DEFAULT_FEATURES=dict(
+            (
+                RTDProductFeature(
+                    type=TYPE_REDIRECTS_LIMIT,
+                    value=2,
+                ).to_item(),
+            )
+        )
+    )
+    def test_redirects_limit(self):
+        self.assertEqual(self.project.redirects.all().count(), 1)
+        url = reverse("projects_redirects_create", args=[self.project.slug])
+        resp = self.client.post(
+            url,
+            data={
+                "redirect_type": EXACT_REDIRECT,
+                "from_url": "a",
+                "to_url": "b",
+                "http_status": 302,
+            },
+        )
+        self.assertEqual(resp.status_code, 302)
+
+        resp = self.client.post(
+            url,
+            data={
+                "redirect_type": EXACT_REDIRECT,
+                "from_url": "c",
+                "to_url": "d",
+                "http_status": 302,
+            },
+        )
+        self.assertEqual(resp.status_code, 200)
+        self.assertContains(
+            resp,
+            "This project has reached the limit of 2 redirects.",
+        )
+        self.assertEqual(self.project.redirects.all().count(), 2)
+
+        # Update works
+        resp = self.client.post(
+            reverse(
+                "projects_redirects_edit", args=[self.project.slug, self.redirect.pk]
+            ),
+            data={
+                "redirect_type": PAGE_REDIRECT,
+                "http_status": 302,
+            },
+        )
+        self.assertEqual(resp.status_code, 302)
+
+        # Delete works
+        resp = self.client.post(
+            reverse(
+                "projects_redirects_delete", args=[self.project.slug, self.redirect.pk]
+            ),
+        )
+        self.assertEqual(resp.status_code, 302)
+
+    def test_create_redirect_prefilled_from_query_params(self):
+        url = reverse("projects_redirects_create", args=[self.project.slug])
+        resp = self.client.get(
+            url,
+            {
+                "redirect_type": EXACT_REDIRECT,
+                "from_url": "/en/old-slug/*",
+                "to_url": "/en/new-slug/:splat",
+                "http_status": 301,
+                "description": "Version slug changed",
+                "force": "true",
+                "unknown": "ignored",
+            },
+        )
+        self.assertEqual(resp.status_code, 200)
+        initial = resp.context["form"].initial
+        self.assertEqual(initial["redirect_type"], EXACT_REDIRECT)
+        self.assertEqual(initial["from_url"], "/en/old-slug/*")
+        self.assertEqual(initial["to_url"], "/en/new-slug/:splat")
+        self.assertEqual(initial["http_status"], "301")
+        self.assertEqual(initial["description"], "Version slug changed")
+        self.assertIs(initial["force"], True)
+        self.assertNotIn("unknown", initial)
+
+    def test_create_redirect_without_query_params(self):
+        url = reverse("projects_redirects_create", args=[self.project.slug])
+        resp = self.client.get(url)
+        self.assertEqual(resp.status_code, 200)
+        self.assertEqual(resp.context["form"].initial, {})
+
+    def test_create_redirect_prefilled_force_false(self):
+        url = reverse("projects_redirects_create", args=[self.project.slug])
+        resp = self.client.get(url, {"force": "false"})
+        self.assertEqual(resp.status_code, 200)
+        self.assertIs(resp.context["form"].initial["force"], False)
 
 
 @override_settings(RTD_ALLOW_ORGANIZATIONS=True)

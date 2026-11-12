@@ -1,0 +1,48 @@
+How-to guides: build process
+============================
+
+⏩️ :doc:`Set up email notifications </guides/build/email-notifications>`
+    Email notifications can alert you when your builds fail.
+    This is the most simple way to monitor your documentation builds.
+
+⏩️ :doc:`/guides/build/webhooks`
+    Outgoing webhooks can used to send updates on builds to other services.
+    We show examples using webhooks to connect to popular platforms like Slack and Discord.
+
+⏩️ :doc:`Configuring pull request builds </guides/pull-requests>`
+    Have your documentation built and access a preview for every :doc:`pull request builds </pull-requests>`.
+
+⏩️ :doc:`Using custom environment variables </guides/environment-variables>`
+    Extra environment variables, for instance secrets, may be needed in the build process and can be defined from the project's :term:`dashboard`.
+
+⏩️ :doc:`Managing versions automatically </guides/automation-rules>`
+    Automating your versioning on Read the Docs means you only have to handle your versioning logic in Git.
+    Learn how to define rules to automate creation of new versions on Read the Docs,
+    entirely using your Git repository's version logic.
+
+⏩️ :doc:`Skip or cancel builds based on conditions </guides/build/skip-or-cancel-builds>`
+    Skip builds before they are triggered using automation rules,
+    or cancel a running build from your own commands using the special exit code 183.
+    This helps save resources by avoiding unnecessary documentation builds.
+
+⏩️ :doc:`Direct upload </guides/build/direct-upload>`
+    Build your documentation in GitHub Actions or any other continuous integration service,
+    and upload the result to Read the Docs for hosting.
+
+
+.. seealso:
+
+   :doc:`/builds`
+      An overview and introduction to the build process.
+
+.. toctree::
+   :maxdepth: 1
+   :hidden:
+
+   Setup email notifications </guides/build/email-notifications>
+   /guides/build/webhooks
+   Configuring pull request builds </guides/pull-requests>
+   Using custom environment variables </guides/environment-variables>
+   Managing versions automatically </guides/automation-rules>
+   Skip or cancel builds based on conditions </guides/build/skip-or-cancel-builds>
+   Direct upload </guides/build/direct-upload>

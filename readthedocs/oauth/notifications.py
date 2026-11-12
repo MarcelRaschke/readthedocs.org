@@ -1,76 +1,194 @@
-from django.urls import reverse
+"""Notifications related to OAuth."""
+
+import textwrap
+
 from django.utils.translation import gettext_lazy as _
-from messages_extends.constants import ERROR_PERSISTENT
 
-from readthedocs.notifications import SiteNotification
-from readthedocs.notifications.constants import ERROR_NON_PERSISTENT
+from readthedocs.notifications.constants import ERROR
+from readthedocs.notifications.constants import INFO
+from readthedocs.notifications.constants import WARNING
+from readthedocs.notifications.messages import Message
+from readthedocs.notifications.messages import registry
 
 
-class AttachWebhookNotification(SiteNotification):
+MESSAGE_OAUTH_WEBHOOK_NO_PERMISSIONS = "oauth:webhook:no-permissions"
+MESSAGE_OAUTH_WEBHOOK_NO_ACCOUNT = "oauth:webhook:no-account"
+MESSAGE_OAUTH_WEBHOOK_INVALID = "oauth:webhook:invalid"
+MESSAGE_OAUTH_UNSUPPORTED_GIT_PROVIDER = "oauth:webhook:unsupported-git-provider"
+MESSAGE_OAUTH_WEBHOOK_INTEGRATION_MISMATCH = "oauth:webhook:integration-mismatch"
+MESSAGE_OAUTH_BUILD_STATUS_FAILURE = "oauth:status:send-failed"
+MESSAGE_OAUTH_DEPLOY_KEY_ATTACHED_FAILED = "oauth:deploy-key:attached-failed"
+MESSAGE_OAUTH_WEBHOOK_NOT_REMOVED = "oauth:migration:webhook-not-removed"
+MESSAGE_OAUTH_DEPLOY_KEY_NOT_REMOVED = "oauth:migration:ssh-key-not-removed"
+MESSAGE_OAUTH_SYNCING_REMOTE_REPOSITORIES = "oauth:syncing-remote-repositories"
+MESSAGE_PROJECTS_TO_MIGRATE_TO_GITHUB_APP = "oauth:migration:projects-to-migrate-to-github-app"
+MESSAGE_OAUTH_BITBUCKET_RECONNECT = "oauth:bitbucket:reconnect"
 
-    # Fail reasons
-    NO_PERMISSIONS = 'no_permissions'
-    NO_ACCOUNTS = 'no_accounts'
-
-    context_object_name = 'provider'
-    success_message = _('Webhook successfully added.')
-    failure_message = {
-        NO_PERMISSIONS: _(
-            'Could not add webhook for {{ project.name }}. Make sure <a href="{{ url_docs_webhook }}">you have the correct {{ provider.name }} permissions</a>.',  # noqa
+messages = [
+    Message(
+        id=MESSAGE_OAUTH_WEBHOOK_NO_ACCOUNT,
+        header=_("Unable to attach webhook to this project"),
+        body=_(
+            textwrap.dedent(
+                """
+            Could not add webhook for "{{instance.name}}".
+            Please <a href="{{url_connect_account}}">connect your {{provider_name}} account</a>.
+            """
+            ).strip(),
         ),
-        NO_ACCOUNTS: _(
-            'Could not add webhook for {{ project.name }}. Please <a href="{{ url_connect_account }}">connect your {{ provider.name }} account</a>.',  # noqa
+        type=ERROR,
+    ),
+    Message(
+        id=MESSAGE_OAUTH_WEBHOOK_NO_PERMISSIONS,
+        header=_("Unable to attach webhook to this project"),
+        body=_(
+            textwrap.dedent(
+                """
+            Could not add webhook for "{{instance.name}}".
+            Make sure <a href="{{url_docs_webhook}}">you have the correct {{provider_name}} permissions</a>.
+            """
+            ).strip(),
         ),
-    }
-
-    def get_context_data(self):
-        context = super().get_context_data()
-        project = self.extra_context.get('project')
-        context.update({
-            'url_connect_account': reverse(
-                'projects_integrations',
-                args=[project.slug],
-            ),
-            'url_docs_webhook': 'http://docs.readthedocs.io/en/latest/webhooks.html',  # noqa
-        })
-        return context
-
-
-class InvalidProjectWebhookNotification(SiteNotification):
-
-    context_object_name = 'project'
-    failure_level = ERROR_PERSISTENT
-    failure_message = _(
-        "The project {{ project.name }} doesn't have a valid webhook set up, "
-        "commits won't trigger new builds for this project. "
-        "See <a href='{{ url_integrations }}'>the project integrations</a> for more information.",
-    )  # noqa
-
-    def get_context_data(self):
-        context = super().get_context_data()
-        context.update({
-            'url_integrations': reverse(
-                'projects_integrations',
-                args=[self.object.slug],
-            ),
-        })
-        return context
-
-
-class GitBuildStatusFailureNotification(SiteNotification):
-
-    context_object_name = 'project'
-    failure_level = ERROR_NON_PERSISTENT
-    failure_message = _(
-        'Could not send {{ provider_name }} build status report for {{ project.name }}. '
-        'Make sure you have the correct {{ provider_name }} repository permissions</a> and '
-        'your <a href="{{ url_connect_account }}">{{ provider_name }} account</a> '
-        "is connected to Read the Docs."
-    )  # noqa
-
-    def get_context_data(self):
-        context = super().get_context_data()
-        context.update({
-            'url_connect_account': reverse('socialaccount_connections'),
-        })
-        return context
+        type=ERROR,
+    ),
+    Message(
+        id=MESSAGE_OAUTH_WEBHOOK_INVALID,
+        header=_("The project doesn't have a valid webhook set up"),
+        body=_(
+            textwrap.dedent(
+                """
+        The project "{{instance.name}}" doesn't have a valid webhook set up,
+        commits won't trigger new builds for this project.
+        See <a href='{{url_integrations}}'>the project integrations</a> for more information.
+            """
+            ).strip(),
+        ),
+        type=ERROR,
+    ),
+    Message(
+        id=MESSAGE_OAUTH_UNSUPPORTED_GIT_PROVIDER,
+        header=_("Unsupported Git provider"),
+        body=_(
+            textwrap.dedent(
+                """
+                The project "{{ instance.name }}" is linked to a Git provider that is not supported by Read the Docs,
+                commits won't trigger new builds for this project.
+                Use a <a href="https://docs.readthedocs.com/platform/stable/guides/setup/git-repo-manual.html">generic integration</a> instead.
+                """
+            ).strip(),
+        ),
+        type=ERROR,
+    ),
+    Message(
+        id=MESSAGE_OAUTH_WEBHOOK_INTEGRATION_MISMATCH,
+        header=_("Incompatible integration"),
+        body=_(
+            textwrap.dedent(
+                """
+                The integration type is not compatible with the Git provider of "{{ instance.name }}",
+                commits won't trigger new builds for this project.
+                Make sure the integration matches the project's Git provider.
+                """
+            ).strip(),
+        ),
+        type=ERROR,
+    ),
+    Message(
+        id=MESSAGE_OAUTH_BUILD_STATUS_FAILURE,
+        header=_("{{provider_name}} build status report failed"),
+        body=_(
+            textwrap.dedent(
+                """
+        Could not send {{provider_name}} build status report for "{{instance.name}}".
+        Make sure you have the correct {{provider_name}} repository permissions and
+        your <a href="{{url_connect_account}}">{{provider_name}} account</a>
+        is connected to Read the Docs.
+        See <a href="https://docs.readthedocs.com/platform/stable/guides/pull-requests.html#troubleshooting">our troubleshooting guide</a> for more information.
+            """
+            ).strip(),
+        ),
+        type=ERROR,
+    ),
+    Message(
+        id=MESSAGE_OAUTH_DEPLOY_KEY_ATTACHED_FAILED,
+        header=_("Failed to add deploy key to project"),
+        body=_(
+            textwrap.dedent(
+                """
+                Failed to add deploy key to {{provider_name}} project,
+                ensure you have the correct permissions and try
+                <a href="https://docs.readthedocs.com/platform/stable/guides/creating-project-private-repository.html#configuring-your-repository">
+                  adding the key manually
+                </a>.
+                """
+            ).strip(),
+        ),
+        type=ERROR,
+    ),
+    Message(
+        id=MESSAGE_OAUTH_WEBHOOK_NOT_REMOVED,
+        header=_("Failed to remove webhook"),
+        body=_(
+            textwrap.dedent(
+                """
+                Failed to remove webhook from the <a href="https://github.com/{{ repo_full_name }}">{{ repo_full_name }}</a> repository, please remove it manually
+                from the <a href="https://github.com/{{ repo_full_name }}/settings/hooks">repository settings</a> (search for a webhook containing "{{ project_slug }}" in the URL).
+                """
+            ).strip(),
+        ),
+        type=WARNING,
+    ),
+    Message(
+        id=MESSAGE_OAUTH_DEPLOY_KEY_NOT_REMOVED,
+        header=_("Failed to remove deploy key"),
+        body=_(
+            textwrap.dedent(
+                """
+                Failed to remove deploy key from the <a href="https://github.com/{{ repo_full_name }}">{{ repo_full_name }}</a> repository, please remove it manually
+                from the <a href="https://github.com/{{ repo_full_name }}/settings/keys">repository settings</a> (search for a deploy key containing "{{ project_slug }}" in the title).
+                """
+            )
+        ),
+        type=WARNING,
+    ),
+    Message(
+        id=MESSAGE_OAUTH_SYNCING_REMOTE_REPOSITORIES,
+        header=_("Syncing repositories from VCS providers"),
+        body=_(
+            textwrap.dedent(
+                """
+                We are syncing your repositories from your connected VCS providers.
+                Access to some projects and repositories might be temporarily unavailable until the sync is complete.
+                """
+            ).strip(),
+        ),
+        type=INFO,
+    ),
+    Message(
+        id=MESSAGE_PROJECTS_TO_MIGRATE_TO_GITHUB_APP,
+        header=_("You have projects that need to be migrated to the new GitHub App"),
+        body=_(
+            textwrap.dedent(
+                """
+                Migrate your projects automatically using the <a href="{% url "migrate_to_github_app" %}">migration page</a>.
+                """
+            ).strip(),
+        ),
+        type=INFO,
+    ),
+    Message(
+        id=MESSAGE_OAUTH_BITBUCKET_RECONNECT,
+        header=_("Reconnect your Bitbucket account"),
+        body=_(
+            textwrap.dedent(
+                """
+                Your Bitbucket connection needs to be renewed.
+                <a href="{% url "socialaccount_connections" %}">Connect your Bitbucket account again</a>
+                to keep importing and syncing repositories.
+                """
+            ).strip(),
+        ),
+        type=WARNING,
+    ),
+]
+registry.add(messages)

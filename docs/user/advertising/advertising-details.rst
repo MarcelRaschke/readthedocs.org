@@ -1,4 +1,4 @@
-Advertising Details
+Advertising details
 ===================
 
 .. NOTE: This document is linked from:
@@ -83,9 +83,7 @@ We can place ads in:
 * a small footer fixed to the bottom of the viewport
 * on 404 pages (rare)
 
-We show no more than one ad per page so you will never see both
-a sidebar ad and a footer ad on the same page.
-
+We never show more than 1 ad on a page.
 
 Do Not Track Policy
 -------------------
@@ -107,26 +105,13 @@ Analytics
 ---------
 
 Analytics are a sensitive enough issue that they require their own section.
-In the spirit of full transparency, Read the Docs uses Google Analytics (GA).
-We go into a bit of detail on our use of GA in our :doc:`/privacy-policy`.
 
-GA is a contentious issue inside Read the Docs and in our community.
+Google Analytics is a contentious issue inside Read the Docs and in our community.
 Some users are very sensitive and privacy conscious to usage of GA.
 Some authors want their own analytics on their docs to see the usage their docs get.
 The developers at Read the Docs understand that different users have different priorities
 and we try to respect the different viewpoints as much as possible while also accomplishing
 our own goals.
-
-We have taken steps to address some of the privacy concerns surrounding GA.
-These steps apply both to analytics collected by Read the Docs and when
-:ref:`authors enable analytics on their docs <analytics:Enabling Google Analytics on your Project>`.
-
-* Users can opt-out of analytics by using the Do Not Track feature of their browser.
-* Read the Docs instructs Google to anonymize IP addresses sent to them.
-* The cookie set by GA is a session (non-persistent) cookie rather than the default 2 years.
-* Project maintainers can completely disable analytics on their own projects.
-  Follow the steps in :ref:`analytics:Disabling Google Analytics on your project`.
-
 
 Why we use analytics
 ~~~~~~~~~~~~~~~~~~~~

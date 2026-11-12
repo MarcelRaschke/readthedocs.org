@@ -1,16 +1,20 @@
 """Analytics modeling to help understand the projects on Read the Docs."""
+
 import datetime
 from collections import namedtuple
 from urllib.parse import urlparse
 
+from django.db import connections
 from django.db import models
+from django.db import router
 from django.db.models import Sum
 from django.utils import timezone
 from django.utils.translation import gettext_lazy as _
 
 from readthedocs.builds.models import Version
-from readthedocs.core.resolver import resolve, resolve_path
-from readthedocs.projects.models import Feature, Project
+from readthedocs.core.resolver import Resolver
+from readthedocs.projects.models import Feature
+from readthedocs.projects.models import Project
 
 
 def _last_30_days_iter():
@@ -22,43 +26,58 @@ def _last_30_days_iter():
 
 
 class PageViewManager(models.Manager):
-
     """Manager for PageView model."""
 
-    def register_page_view(self, project, version, path, full_path, status):
+    def register_page_view(self, project, version, filename, path, status):
         """Track page view with the given parameters."""
         # TODO: remove after the migration of duplicate records has been completed.
         if project.has_feature(Feature.DISABLE_PAGEVIEWS):
             return
 
         # Normalize paths to avoid duplicates.
+        filename = "/" + filename.lstrip("/")
         path = "/" + path.lstrip("/")
-        full_path = "/" + full_path.lstrip("/")
 
-        page_view, created = self.get_or_create(
-            project=project,
-            version=version,
-            path=path,
-            date=timezone.now().date(),
-            status=status,
-            defaults={
-                "view_count": 1,
-                "full_path": full_path,
-            },
-        )
-        if not created:
-            page_view.view_count = models.F("view_count") + 1
-            page_view.save(update_fields=["view_count"])
-        return page_view
+        # A single upsert instead of ``get_or_create`` + ``save``: the lookup
+        # by ``date`` picked a bad plan until the day's statistics caught up,
+        # and the ORM can't express an increment on conflict.
+        # Rows without a version are covered by a partial unique index,
+        # which only matches if the conflict target repeats its condition.
+        if version is None:
+            conflict_target = "(project_id, path, date, status) WHERE version_id IS NULL"
+        else:
+            conflict_target = "(project_id, version_id, path, date, status)"
+
+        # Explicitly route to the write database, ``self.db`` is the read database.
+        db = self._db or router.db_for_write(self.model, **self._hints)
+        connection = connections[db]
+        table = connection.ops.quote_name(self.model._meta.db_table)
+        with connection.cursor() as cursor:
+            cursor.execute(
+                f"""
+                INSERT INTO {table}
+                    (project_id, version_id, path, full_path, view_count, date, status)
+                VALUES (%s, %s, %s, %s, 1, %s, %s)
+                ON CONFLICT {conflict_target}
+                DO UPDATE SET view_count = {table}.view_count + 1
+                """,
+                [
+                    project.pk,
+                    version.pk if version else None,
+                    filename,
+                    path,
+                    timezone.now().date(),
+                    int(status),
+                ],
+            )
 
 
 class PageView(models.Model):
-
     """PageView counts per day for a project, version, and path."""
 
     project = models.ForeignKey(
         Project,
-        related_name='page_views',
+        related_name="page_views",
         on_delete=models.CASCADE,
     )
     # NOTE: this could potentially be removed,
@@ -66,8 +85,8 @@ class PageView(models.Model):
     # views (404s) are attached to a version.
     version = models.ForeignKey(
         Version,
-        verbose_name=_('Version'),
-        related_name='page_views',
+        verbose_name=_("Version"),
+        related_name="page_views",
         on_delete=models.CASCADE,
         null=True,
     )
@@ -82,7 +101,7 @@ class PageView(models.Model):
         blank=True,
     )
     view_count = models.PositiveIntegerField(default=0)
-    date = models.DateField(default=datetime.date.today)
+    date = models.DateField(default=datetime.date.today, db_index=True)
     status = models.PositiveIntegerField(
         default=200,
         help_text=_("HTTP status code"),
@@ -102,13 +121,19 @@ class PageView(models.Model):
             ),
         ]
 
-    def __str__(self):
-        return f"PageView: [{self.project.slug}] - {self.full_path or self.path} for {self.date}"
+        # Index created to improve performance Traffic Analytics page on the dashboard.
+        # Used in PageView.top_viewed_pages.
+        # https://github.com/readthedocs/readthedocs.org/issues/12686
+        indexes = [
+            models.Index(
+                fields=["project", "date", "status"],
+                include=["path", "view_count"],
+                name="analytics_pageview_issue_12686",
+            ),
+        ]
 
     @classmethod
-    def top_viewed_pages(
-        cls, project, since=None, limit=10, status=200, per_version=False
-    ):
+    def top_viewed_pages(cls, project, since=None, limit=10, status=200, per_version=False):
         """
         Returns top pages according to view counts.
 
@@ -131,14 +156,15 @@ class PageView(models.Model):
         )
 
         PageViewResult = namedtuple("PageViewResult", "path, url, count")
+        resolver = Resolver()
         result = []
-        parsed_domain = urlparse(resolve(project))
+        parsed_domain = urlparse(resolver.get_domain(project))
         default_version = project.get_default_version()
         for row in queryset:
             if not per_version:
                 # If we aren't groupig by version,
                 # then always link to the default version.
-                url_path = resolve_path(
+                url_path = resolver.resolve_path(
                     project=project,
                     version_slug=default_version,
                     filename=row.path,
@@ -184,9 +210,7 @@ class PageView(models.Model):
             .order_by("date")
         )
 
-        count_dict = dict(
-            queryset.order_by('date').values_list('date', 'total_views')
-        )
+        count_dict = dict(queryset.order_by("date").values_list("date", "total_views"))
 
         # This fills in any dates where there is no data
         # to make sure we have a full 30 days of dates
@@ -195,13 +219,12 @@ class PageView(models.Model):
         # format the date value to a more readable form
         # Eg. `16 Jul`
         last_30_days_str = [
-            timezone.datetime.strftime(date, '%d %b')
-            for date in _last_30_days_iter()
+            timezone.datetime.strftime(date, "%d %b") for date in _last_30_days_iter()
         ]
 
         final_data = {
-            'labels': last_30_days_str,
-            'int_data': count_data,
+            "labels": last_30_days_str,
+            "int_data": count_data,
         }
 
         return final_data

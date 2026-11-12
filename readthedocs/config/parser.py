@@ -1,14 +1,12 @@
-# -*- coding: utf-8 -*-
-
 """YAML parser for the RTD configuration file."""
 
 import yaml
 
-__all__ = ('parse', 'ParseError')
+
+__all__ = ("parse", "ParseError")
 
 
 class ParseError(Exception):
-
     """Parser related errors."""
 
 
@@ -22,9 +20,9 @@ def parse(stream):
     try:
         config = yaml.safe_load(stream)
     except yaml.YAMLError as error:
-        raise ParseError('YAML: {message}'.format(message=error))
+        raise ParseError("YAML: {message}".format(message=error))
     if not isinstance(config, dict):
-        raise ParseError('Expected mapping')
+        raise ParseError("Expected mapping")
     if not config:
-        raise ParseError('Empty config')
+        raise ParseError("Empty config")
     return config

@@ -29,8 +29,14 @@ def delete_old_build_data():
     This is intended to run from a periodic task daily.
 
     NOTE: the logic of this task could be improved to keep longer data we care
-          more (eg. active projects )and remove data we don't (eg. builds from spam projects)
+          more (eg. active projects) and remove data we don't (eg. builds from spam projects)
     """
     retention_days = settings.RTD_TELEMETRY_DATA_RETENTION_DAYS
     days_ago = timezone.now().date() - timezone.timedelta(days=retention_days)
-    return BuildData.objects.filter(created__lt=days_ago).delete()
+
+    # NOTE: We use _raw_delete to avoid Django fetching all objects
+    # before the deletion. `pre_delete` and `post_delete` signals
+    # won't be sent, this is fine as we don't have any special logic
+    # for the BuildData model, and doesn't have related objects.
+    query = BuildData.objects.filter(created__lt=days_ago)
+    query._raw_delete(query.db)

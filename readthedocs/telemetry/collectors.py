@@ -7,12 +7,13 @@ import dparse
 import structlog
 
 from readthedocs.config.models import PythonInstallRequirements
+from readthedocs.core.utils.filesystem import safe_open
+
 
 log = structlog.get_logger(__name__)
 
 
 class BuildDataCollector:
-
     """
     Build data collector.
 
@@ -27,7 +28,7 @@ class BuildDataCollector:
         self.config = self.environment.config
         self.checkout_path = self.project.checkout_path(self.version.slug)
 
-        log.bind(
+        structlog.contextvars.bind_contextvars(
             build_id=self.build["id"],
             project_slug=self.project.slug,
             version_slug=self.version.slug,
@@ -35,7 +36,7 @@ class BuildDataCollector:
 
     @staticmethod
     def _safe_json_loads(content, default=None):
-        def lowercase(d):  # pylint: disable=invalid-name
+        def lowercase(d):
             """Convert all dictionary keys to lowercase."""
             return {k.lower(): i for k, i in d.items()}
 
@@ -74,9 +75,7 @@ class BuildDataCollector:
         data["python"] = self._get_python_version()
 
         user_apt_packages, all_apt_packages = self._get_apt_packages()
-        conda_packages = (
-            self._get_all_conda_packages() if self.config.is_using_conda else {}
-        )
+        conda_packages = self._get_all_conda_packages() if self.config.is_using_conda else {}
         data["packages"] = {
             "pip": {
                 "user": self._get_user_pip_packages(),
@@ -91,6 +90,7 @@ class BuildDataCollector:
             },
         }
         data["doctool"] = self._get_doctool()
+
         return data
 
     def _get_doctool_name(self):
@@ -113,7 +113,7 @@ class BuildDataCollector:
             return data
 
         # The project does not define a `conf.py` or does not have one
-        if not self.config.sphinx.configuration:
+        if not self.config.sphinx or not self.config.sphinx.configuration:
             return data
 
         conf_py_dir = os.path.join(
@@ -122,7 +122,7 @@ class BuildDataCollector:
         )
         filepath = os.path.join(conf_py_dir, "_build", "json", "telemetry.json")
         if os.path.exists(filepath):
-            with open(filepath, "r") as json_file:
+            with safe_open(filepath, "r") as json_file:
                 content = json_file.read()
             data.update(self._safe_json_loads(content, {}))
         return data
@@ -157,9 +157,7 @@ class BuildDataCollector:
                 }
             ]
         """
-        code, stdout, _ = self.run(
-            "conda", "list", "--json", "--name", self.version.slug
-        )
+        code, stdout, _ = self.run("conda", "list", "--json", "--name", self.version.slug)
         if code == 0 and stdout:
             packages = self._safe_json_loads(stdout, [])
             packages = [
@@ -194,7 +192,6 @@ class BuildDataCollector:
                 if install.requirements:
                     cmd = ["cat", install.requirements]
                     _, stdout, _ = self.run(*cmd, cwd=self.checkout_path)
-                    # pylint: disable=invalid-name
                     df = dparse.parse(
                         stdout, file_type=dparse.filetypes.requirements_txt
                     ).serialize()
@@ -263,7 +260,6 @@ class BuildDataCollector:
             "--local",
             "--format",
             "json",
-            "--not-required",
         ]
         code, stdout, _ = self.run(*cmd)
         if code == 0 and stdout:
@@ -354,8 +350,7 @@ class BuildDataCollector:
 
     def _get_user_apt_packages(self):
         return [
-            {"name": package.lower(), "version": ""}
-            for package in self.config.build.apt_packages
+            {"name": package.lower(), "version": ""} for package in self.config.build.apt_packages
         ]
 
     def _get_python_version(self):

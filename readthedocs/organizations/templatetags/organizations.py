@@ -5,8 +5,10 @@ from django.contrib.auth.models import User
 from django.core.exceptions import FieldError
 
 from readthedocs.core.permissions import AdminPermission
-from readthedocs.organizations.models import Organization, Team
+from readthedocs.organizations.models import Organization
+from readthedocs.organizations.models import Team
 from readthedocs.projects.models import Project
+
 
 register = template.Library()
 
@@ -46,7 +48,7 @@ def org_owner(user, obj):  # noqa
             organization__owners=user,
             organization=obj.organization,
         ).exists()
-    except (FieldError, AttributeError):
+    except FieldError, AttributeError:
         return False
 
 
@@ -68,7 +70,7 @@ def admin_teams(user):
     return Team.objects.admin(user)
 
 
-@register.filter(name='has_sso_enabled')
+@register.filter(name="has_sso_enabled")
 def has_sso_enabled_filter(obj, provider=None):
     """Check if `obj` has sso enabled for `provider`."""
     return AdminPermission.has_sso_enabled(obj, provider)

@@ -8,14 +8,15 @@ from readthedocs.projects.validators import validate_domain_name
 
 
 class SSOIntegration(models.Model):
-
     """Single Sign-On integration for an Organization."""
 
-    PROVIDER_ALLAUTH = 'allauth'
-    PROVIDER_EMAIL = 'email'
+    PROVIDER_ALLAUTH = "allauth"
+    PROVIDER_EMAIL = "email"
+    PROVIDER_SAML = "saml"
     PROVIDER_CHOICES = (
-        (PROVIDER_ALLAUTH, 'AllAuth'),
-        (PROVIDER_EMAIL, 'Email'),
+        (PROVIDER_ALLAUTH, "AllAuth"),
+        (PROVIDER_EMAIL, "Email"),
+        (PROVIDER_SAML, "SAML"),
     )
 
     name = models.CharField(
@@ -29,23 +30,39 @@ class SSOIntegration(models.Model):
         # editable=False,
     )
     organization = models.OneToOneField(
-        'organizations.Organization',
+        "organizations.Organization",
         on_delete=models.CASCADE,
     )
     provider = models.CharField(
         choices=PROVIDER_CHOICES,
         max_length=32,
     )
-    domains = models.ManyToManyField(
-        'sso.SSODomain',
-        related_name='ssointegrations',
+
+    saml_app = models.OneToOneField(
+        "socialaccount.SocialApp",
+        related_name="sso_integration",
+        on_delete=models.CASCADE,
+        null=True,
         blank=True,
     )
 
+    domains = models.ManyToManyField(
+        "sso.SSODomain",
+        related_name="ssointegrations",
+        blank=True,
+    )
+
+    using_old_dashboard = models.BooleanField(
+        default=False,
+        null=True,
+        blank=True,
+        help_text=(
+            "Whether the SSO integration is using the old dashboard for authentication. Mainly used for SAML integrations."
+        ),
+    )
+
     def __str__(self):
-        if self.name:
-            return f'"{self.name}" for "{self.organization}" ({self.provider})'
-        return f'{self.organization} ({self.provider})'
+        return self.name or self.provider
 
 
 class SSODomain(models.Model):
@@ -56,4 +73,4 @@ class SSODomain(models.Model):
     )
 
     def __str__(self):
-        return f'{self.domain}'
+        return self.domain

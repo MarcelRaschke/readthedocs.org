@@ -1,24 +1,46 @@
 """Invitation views."""
+
 import structlog
 from django.contrib.auth.mixins import UserPassesTestMixin
-from django.http import Http404, HttpResponseBadRequest, HttpResponseRedirect
+from django.http import Http404
+from django.http import HttpResponseBadRequest
+from django.http import HttpResponseRedirect
 from django.shortcuts import get_object_or_404
 from django.urls import reverse
-from django.views.generic import DeleteView, DetailView
+from django.views.generic import DeleteView
+from django.views.generic import DetailView
 
+from readthedocs.audit.models import AuditLog
 from readthedocs.core.mixins import PrivateViewMixin
 from readthedocs.core.permissions import AdminPermission
 from readthedocs.invitations.models import Invitation
-from readthedocs.organizations.models import Organization, Team, TeamInvite
+from readthedocs.organizations.models import Organization
+from readthedocs.organizations.models import Team
+from readthedocs.organizations.models import TeamInvite
+
 
 log = structlog.get_logger(__name__)
 
 
 class RevokeInvitation(PrivateViewMixin, UserPassesTestMixin, DeleteView):
+    """
+    Revoke invitation view.
+
+    An invitation is revoked by simple deleting it.
+    """
 
     model = Invitation
     pk_url_kwarg = "invitation_pk"
     http_method_names = ["post"]
+
+    def form_valid(self, form):
+        invitation = self.get_object()
+        invitation.create_audit_log(
+            action=AuditLog.INVITATION_REVOKED,
+            request=self.request,
+            user=self.request.user,
+        )
+        return super().form_valid(form)
 
     def test_func(self):
         invitation = self.get_object()
@@ -30,7 +52,6 @@ class RevokeInvitation(PrivateViewMixin, UserPassesTestMixin, DeleteView):
 
 
 class RedeemInvitation(DetailView):
-
     """
     Allow the user to accept or decline an invitation.
 
@@ -47,14 +68,11 @@ class RedeemInvitation(DetailView):
         invitation = self.get_object()
         from_user = invitation.from_user
         context["requestor_name"] = from_user.get_full_name() or from_user.username
-        context["requestor_url"] = reverse(
-            "profiles_profile_detail", args=[from_user.username]
-        )
+        context["requestor_url"] = reverse("profiles_profile_detail", args=[from_user.username])
         context["target_name"] = invitation.object_name
         context["target_type"] = invitation.object._meta.verbose_name
         return context
 
-    # pylint: disable=unused-argument
     def post(self, request, *args, **kwargs):
         """
         Accept or decline an invitation.
@@ -73,15 +91,20 @@ class RedeemInvitation(DetailView):
             # redeem the invitation after the user has signed-up.
             if not request.user.is_authenticated and invitation.to_email:
                 return self.redeem_at_sign_up(invitation)
-            invitation.redeem(request.user)
+            invitation.redeem(request.user, request=request)
             url = invitation.get_success_url()
         else:
             log.info(
                 "Invitation declined",
-                invitation_pk=invitation.pk,
+                invitation_id=invitation.pk,
                 object_type=invitation.object_type,
                 object_name=invitation.object_name,
-                object_pk=invitation.object.pk,
+                object_id=invitation.object.pk,
+            )
+            invitation.create_audit_log(
+                action=AuditLog.INVITATION_DECLINED,
+                request=request,
+                user=invitation.to_user,
             )
         invitation.delete()
         return HttpResponseRedirect(url)
